@@ -48,6 +48,112 @@ const JSONBIN_BASE = 'https://api.jsonbin.io/v3/b';
 
 let _index = null; // { [key]: binId }
 let _indexLoadPromise = null;
+let _indexMutationQueue = Promise.resolve();
+
+// ---------------------------------------------------------------
+// 자동 백업
+// 최근 10개의 백업을 JSONBin에 별도로 보관한다. 백업은 현재 영화 bin을
+// 재사용하지 않고 각 영화의 내용을 별도 bin으로 복제하므로, 이후 영화가
+// 수정/삭제되어도 과거 백업이 영향을 받지 않는다.
+// ---------------------------------------------------------------
+const BACKUP_PREFIX = 'backup:';
+const BACKUP_LIMIT = 10;
+let _backupQueue = Promise.resolve();
+
+function makeBackupId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function createAutomaticBackup({ movies, customFormats, settings, reason = '저장' }) {
+  const job = _backupQueue.then(async () => {
+    const id = makeBackupId();
+    const createdAt = new Date().toISOString();
+    const movieBins = {};
+
+    // 영화별로 별도 백업 bin을 만들어 100KB 제한을 피한다.
+    await runInBatches(movies, async movie => {
+      movieBins[movie.id] = await createBin(JSON.stringify(movie));
+    }, 8);
+
+    const meta = {
+      id,
+      createdAt,
+      reason,
+      count: movies.length,
+      customFormats: Array.isArray(customFormats) ? customFormats : [],
+      settings: settings || DEFAULT_SETTINGS,
+      movieBins,
+    };
+    const metaBinId = await createBin(meta);
+
+    // 백업 목록은 인덱스 안의 일반 key로 관리하되, 영화 데이터와 분리한다.
+    await queueIndexMutation(
+      idx => { idx[`${BACKUP_PREFIX}${id}`] = metaBinId; },
+      idx => idx[`${BACKUP_PREFIX}${id}`] === metaBinId
+    );
+
+    // 최신 10개만 유지한다. 오래된 백업은 인덱스에서 먼저 제거한 뒤
+    // 실제 bin도 정리한다. 정리 실패가 새 백업 성공을 무효화하지는 않는다.
+    const index = await fetchIndexFromCloud();
+    const backupEntries = Object.entries(index || {})
+      .filter(([key]) => key.startsWith(BACKUP_PREFIX))
+      .sort((a, b) => a[0].slice(BACKUP_PREFIX.length).localeCompare(b[0].slice(BACKUP_PREFIX.length)));
+
+    const old = backupEntries.slice(0, Math.max(0, backupEntries.length - BACKUP_LIMIT));
+    for (const [key, metaId] of old) {
+      try {
+        const oldMeta = await readBin(metaId);
+        const oldMovieBins = oldMeta?.movieBins ? Object.values(oldMeta.movieBins) : [];
+        await queueIndexMutation(idx => { delete idx[key]; }, idx => !Object.prototype.hasOwnProperty.call(idx, key));
+        try { await fetch(`${JSONBIN_BASE}/${metaId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
+        await Promise.all(oldMovieBins.map(binId => fetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }).catch(() => null)));
+      } catch (_) {
+        // 백업 정리는 best-effort. 새 백업 자체는 유지한다.
+      }
+    }
+
+    return { id, createdAt, count: movies.length, reason };
+  });
+  _backupQueue = job.catch(() => {});
+  return job;
+}
+
+async function listAutomaticBackups() {
+  const index = await fetchIndexFromCloud();
+  const entries = Object.entries(index || {}).filter(([key]) => key.startsWith(BACKUP_PREFIX));
+  const result = [];
+  for (const [key, metaBinId] of entries) {
+    try {
+      const meta = await readBin(metaBinId);
+      if (meta?.id) result.push({ ...meta, metaBinId });
+    } catch (_) {}
+  }
+  return result.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, BACKUP_LIMIT);
+}
+
+async function restoreAutomaticBackup(backup) {
+  const movieBins = backup?.movieBins || {};
+  const ids = Object.keys(movieBins);
+  const restored = [];
+  await runInBatches(ids, async id => {
+    const raw = await readBin(movieBins[id]);
+    const movie = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (movie?.id) restored.push(movie);
+  }, 8);
+
+  // 기존 영화는 삭제하고 백업 시점의 영화를 다시 연결한다.
+  const currentIndex = await fetchIndexFromCloud();
+  const currentMovieKeys = Object.keys(currentIndex || {}).filter(k => k.startsWith('movie:'));
+  for (const key of currentMovieKeys) {
+    await window.storage.delete(key);
+  }
+  for (const movie of restored) {
+    await window.storage.set(`movie:${movie.id}`, JSON.stringify(movie));
+  }
+  await window.storage.set('custom-formats', JSON.stringify(backup.customFormats || []));
+  await window.storage.set('settings', JSON.stringify(backup.settings || DEFAULT_SETTINGS));
+  return restored;
+}
 
 function jsonbinHeaders(extra) {
   return { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_KEY, ...(extra || {}) };
@@ -56,7 +162,7 @@ function jsonbinHeaders(extra) {
 function reportSaveFailure(status, body) {
   let msg = `클라우드 저장 실패 (${status})`;
   if (body && body.message) msg += `: ${body.message}`;
-  window.alert('⚠️ ' + msg + '\n방금 한 변경사항이 다른 기기에는 반영되지 않았을 수 있어요.');
+  window.alert('⚠️ ' + msg + '\n변경사항을 저장하지 못했어요. 기존 데이터는 그대로 유지됩니다.');
 }
 
 async function createBin(value) {
@@ -88,16 +194,28 @@ async function updateBin(binId, value) {
 
 async function readBin(binId) {
   const res = await fetch(`${JSONBIN_BASE}/${binId}/latest`, { headers: jsonbinHeaders() });
-  if (!res.ok) throw new Error('bin 읽기 실패');
+  if (!res.ok) throw new Error(`bin 읽기 실패 (${res.status})`);
   const data = await res.json();
   return data?.record?.value;
 }
 
-async function saveIndex() {
+async function fetchIndexFromCloud() {
+  const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, {
+    headers: jsonbinHeaders(),
+    cache: 'no-store',
+  });
+  if (!res.ok) throw new Error(`인덱스 읽기 실패 (${res.status})`);
+  const data = await res.json();
+  const record = (data && data.record && typeof data.record === 'object') ? data.record : {};
+  if (record.index && typeof record.index === 'object') return { ...record.index };
+  return null;
+}
+
+async function saveIndex(indexToSave) {
   const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}`, {
     method: 'PUT',
     headers: jsonbinHeaders(),
-    body: JSON.stringify({ index: _index }),
+    body: JSON.stringify({ index: indexToSave }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => null);
@@ -120,51 +238,72 @@ async function runInBatches(items, worker, batchSize = 8) {
 async function loadIndex() {
   if (_index) return _index;
   if (_indexLoadPromise) return _indexLoadPromise;
+
   _indexLoadPromise = (async () => {
-    try {
-      const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, { headers: jsonbinHeaders() });
-      const data = await res.json();
-      const record = (data && data.record && typeof data.record === 'object') ? data.record : {};
-      if (record.index && typeof record.index === 'object') {
-        _index = record.index;
-      } else if (record.kv && typeof record.kv === 'object') {
-        // 구버전(통짜 bin) 데이터 마이그레이션: 각 항목을 개별 bin으로 분리
-        const entries = Object.entries(record.kv);
-        const newIndex = {};
-        await runInBatches(entries, async ([k, v]) => {
-          const binId = await createBin(v);
-          newIndex[k] = binId;
-        });
-        _index = newIndex;
-        await saveIndex();
-      } else {
-        _index = {};
-      }
-    } catch (e) {
-      window.alert('⚠️ 기존 데이터를 불러오거나 옮기는 중 오류가 발생했어요:\n\n' + (e && e.message ? e.message : e) + '\n\n이 내용을 캡처해서 알려주시면 원인을 확인할 수 있어요.');
+    const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, {
+      headers: jsonbinHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) throw new Error(`인덱스 읽기 실패 (${res.status})`);
+    const data = await res.json();
+    const record = (data && data.record && typeof data.record === 'object') ? data.record : {};
+
+    if (record.index && typeof record.index === 'object') {
+      _index = { ...record.index };
+    } else if (record.kv && typeof record.kv === 'object') {
+      // 구버전(통짜 bin) 데이터 마이그레이션: 각 항목을 개별 bin으로 분리
+      const entries = Object.entries(record.kv);
+      const newIndex = {};
+      await runInBatches(entries, async ([k, v]) => {
+        const binId = await createBin(v);
+        newIndex[k] = binId;
+      });
+      await saveIndex(newIndex);
+      _index = newIndex;
+    } else {
+      // 정상적으로 읽었고 실제로 비어 있는 경우에만 빈 인덱스로 시작한다.
       _index = {};
     }
     return _index;
   })();
-  return _indexLoadPromise;
+
+  try {
+    return await _indexLoadPromise;
+  } catch (e) {
+    // 핵심: 네트워크/서버 오류를 절대로 '빈 데이터'로 바꾸지 않는다.
+    _indexLoadPromise = null;
+    throw e;
+  }
 }
 
-// 인덱스에 항목을 더하거나 뺄 때는, 쓰기 직전에 클라우드의 '지금 이 순간' 최신 인덱스를
-// 다시 받아와 그 위에 이번 변경 하나만 얹어서 저장한다. 오래 열어둔 탭이 그사이 다른 기기가
-// 추가/삭제한 항목을 모른 채 인덱스를 통째로 덮어써서 사라지게 만드는 걸 막기 위함이다.
-async function withFreshIndex(mutate) {
-  let fresh;
-  try {
-    const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, { headers: jsonbinHeaders() });
-    const data = await res.json();
-    const record = (data && data.record && typeof data.record === 'object') ? data.record : {};
-    fresh = (record.index && typeof record.index === 'object') ? { ...record.index } : {};
-  } catch (e) {
-    fresh = _index ? { ..._index } : {};
-  }
-  mutate(fresh);
-  _index = fresh;
-  await saveIndex();
+// 인덱스 변경은 한 탭 안에서는 반드시 직렬화하고, 저장 뒤 다시 읽어서
+// 이번 변경이 실제 클라우드 인덱스에 남아 있는지 확인한다.
+// 다른 기기/탭이 거의 동시에 저장해 덮어쓴 경우 최신 인덱스 위에 다시 적용한다.
+function queueIndexMutation(mutator, verify) {
+  const job = _indexMutationQueue.then(async () => {
+    let lastError = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const fresh = await fetchIndexFromCloud();
+        if (fresh === null) throw new Error('클라우드 인덱스 형식이 올바르지 않음');
+        mutator(fresh);
+        await saveIndex(fresh);
+
+        const confirmed = await fetchIndexFromCloud();
+        if (confirmed !== null && verify(confirmed)) {
+          _index = confirmed;
+          return confirmed;
+        }
+        lastError = new Error('동시 저장 충돌 감지');
+      } catch (e) {
+        lastError = e;
+      }
+      await new Promise(resolve => setTimeout(resolve, 120 * (attempt + 1)));
+    }
+    throw lastError || new Error('인덱스 저장 실패');
+  });
+  _indexMutationQueue = job.catch(() => {});
+  return job;
 }
 
 window.storage = {
@@ -175,25 +314,43 @@ window.storage = {
     const value = await readBin(binId);
     return { key, value, shared: false };
   },
+
   async set(key, value) {
     const index = await loadIndex();
-    if (index[key]) {
-      await updateBin(index[key], value);
+    const existingBinId = index[key];
+
+    if (existingBinId) {
+      await updateBin(existingBinId, value);
     } else {
       const binId = await createBin(value);
-      await withFreshIndex(idx => { idx[key] = binId; });
+      try {
+        await queueIndexMutation(
+          idx => { idx[key] = binId; },
+          idx => idx[key] === binId
+        );
+      } catch (e) {
+        // 인덱스 연결에 실패한 고아 bin은 정리 시도. 실패해도 기존 데이터에는 영향 없음.
+        try { await fetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
+        throw e;
+      }
     }
     return { key, value, shared: false };
   },
+
   async delete(key) {
     const index = await loadIndex();
     const binId = index[key];
-    if (binId) {
-      try { await fetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (e) { /* noop */ }
-      await withFreshIndex(idx => { delete idx[key]; });
-    }
+    if (!binId) return { key, deleted: true, shared: false };
+
+    // 먼저 인덱스에서 제거를 확정한 뒤 실제 bin을 삭제한다.
+    await queueIndexMutation(
+      idx => { delete idx[key]; },
+      idx => !Object.prototype.hasOwnProperty.call(idx, key)
+    );
+    try { await fetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
     return { key, deleted: true, shared: false };
   },
+
   async list(prefix = '') {
     const index = await loadIndex();
     const keys = Object.keys(index).filter(k => k.indexOf(prefix) === 0);
@@ -225,6 +382,7 @@ const MapPin = makeIcon(<><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0
 const Film = makeIcon(<><rect x="2" y="2" width="20" height="20" rx="2" /><line x1="7" y1="2" x2="7" y2="22" /><line x1="17" y1="2" x2="17" y2="22" /><line x1="2" y1="12" x2="22" y2="12" /><line x1="2" y1="7" x2="7" y2="7" /><line x1="2" y1="17" x2="7" y2="17" /><line x1="17" y1="17" x2="22" y2="17" /><line x1="17" y1="7" x2="22" y2="7" /></>);
 const SettingsIcon = makeIcon(<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>);
 const Loader2 = makeIcon(<path d="M21 12a9 9 0 1 1-6.219-8.56" />);
+const RotateCcw = makeIcon(<><polyline points="1 4 1 10 7 10" /><path d="M3.5 15a9 9 0 1 0 .5-8.5L1 10" /></>);
 const PackageCheck = makeIcon(<><path d="M16 16l2 2 4-4" /><path d="M21 10V7a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 7v10a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0" /><path d="M3.29 7L12 12l8.71-5" /><line x1="12" y1="22" x2="12" y2="12" /></>);
 const Link2 = makeIcon(<><path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3" /><path d="M9 17H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3" /><line x1="8" y1="12" x2="16" y2="12" /></>);
 const PlusCircle = makeIcon(<><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" /></>);
@@ -419,8 +577,10 @@ function buildDisplayEntries(list, expandedSeries) {
         .sort((a, b) => (Number(a.seriesOrder) || 0) - (Number(b.seriesOrder) || 0));
       group.forEach(g => seen.add(g.id));
       if (expandedSeries.has(m.seriesId)) {
-        entries.push({ type: 'series-header', seriesId: m.seriesId, seriesName: m.seriesName, count: group.length });
-        group.forEach(g => entries.push({ type: 'movie', movie: g }));
+        // 펼친 시리즈는 하나의 '블록'으로 취급한다.
+        // 바깥 카드 그리드의 다른 영화와 섞이지 않고 별도의 한 줄에 놓이도록
+        // 헤더 + 시리즈 카드들을 내부 그리드에서 렌더링한다.
+        entries.push({ type: 'series-block', seriesId: m.seriesId, seriesName: m.seriesName, movies: group });
       } else {
         entries.push({ type: 'series-bundle', seriesId: m.seriesId, seriesName: m.seriesName, movies: group });
       }
@@ -552,7 +712,7 @@ function StarRating({ value, onChange, size = 15, readOnly = false }) {
   );
 }
 
-function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onCancel, onDelete, onAddCustomFormat, onAddSection, onAddCategory, onManageSection }) {
+function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onCancel, onDelete, onAddCustomFormat, onAddSection, onAddCategory, onManageSection, saving }) {
   const isEdit = !!initial;
   const [titleKr, setTitleKr] = useState(initial?.titleKr || '');
   const [titleOriginal, setTitleOriginal] = useState(initial?.titleOriginal || '');
@@ -990,7 +1150,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
             confirmDelete ? (
               <div className="confirm-delete">
                 <span>정말 삭제할까요?</span>
-                <button type="button" className="btn btn--danger" onClick={() => onDelete(initial.id)}>삭제</button>
+                <button type="button" className="btn btn--danger" onClick={() => onDelete(initial.id)} disabled={saving}>삭제</button>
                 <button type="button" className="btn btn--ghost" onClick={() => setConfirmDelete(false)}>취소</button>
               </div>
             ) : (
@@ -1000,8 +1160,8 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
             )
           )}
           <div className="drawer__foot-actions">
-            <button type="button" className="btn btn--ghost" onClick={onCancel}>취소</button>
-            <button type="button" className="btn btn--primary" onClick={handleSave} disabled={!titleKr.trim()}>저장</button>
+            <button type="button" className="btn btn--ghost" onClick={onCancel} disabled={saving}>취소</button>
+            <button type="button" className="btn btn--primary" onClick={handleSave} disabled={!titleKr.trim() || saving}>{saving ? <><Loader2 size={14} className="spin" /> 저장 중...</> : '저장'}</button>
           </div>
         </div>
       </div>
@@ -1009,7 +1169,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   );
 }
 
-function BulkImportModal({ onCancel, onConfirm }) {
+function BulkImportModal({ onCancel, onConfirm, saving }) {
   const [text, setText] = useState('');
   const [parsed, setParsed] = useState(null);
 
@@ -1067,18 +1227,41 @@ function BulkImportModal({ onCancel, onConfirm }) {
               )}
             </div>
           )}
+
+          <div className="field backup-section">
+            <span>자동 백업</span>
+            <p className="hint-text-small">저장에 성공할 때마다 현재 영화 목록과 설정을 별도 백업하고, 최근 10개를 유지해요. 복구해도 백업 자체는 삭제되지 않아요.</p>
+            <div className="backup-actions">
+              <button type="button" className="btn btn--ghost btn--sm" onClick={onRefreshBackups} disabled={backupBusy}>
+                {backupBusy ? <><Loader2 size={13} className="spin" /> 확인 중...</> : '백업 새로고침'}
+              </button>
+            </div>
+            <div className="backup-list">
+              {backups.length === 0 ? <div className="hint-text-small">아직 자동 백업이 없어요. 다음 저장부터 자동으로 만들어집니다.</div> : backups.map(b => (
+                <div className="backup-row" key={b.id}>
+                  <div>
+                    <div className="backup-row__date">{new Date(b.createdAt).toLocaleString('ko-KR')}</div>
+                    <div className="backup-row__meta">{b.count}편 · {b.reason || '저장'}</div>
+                  </div>
+                  <button type="button" className="btn btn--ghost btn--sm" onClick={() => onRestoreBackup(b)} disabled={backupBusy}>
+                    <RotateCcw size={13} /> 복구
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
         <div className="drawer__foot">
           <div />
           <div className="drawer__foot-actions">
-            <button type="button" className="btn btn--ghost" onClick={onCancel}>취소</button>
+            <button type="button" className="btn btn--ghost" onClick={onCancel} disabled={saving}>취소</button>
             <button
               type="button"
               className="btn btn--primary"
-              disabled={!parsed || parsed.ok.length === 0}
+              disabled={!parsed || parsed.ok.length === 0 || saving}
               onClick={() => onConfirm(parsed.ok)}
             >
-              {parsed ? `${parsed.ok.length}건 추가하기` : '추가하기'}
+              {saving ? <><Loader2 size={14} className="spin" /> 저장 중...</> : (parsed ? `${parsed.ok.length}건 추가하기` : '추가하기')}
             </button>
           </div>
         </div>
@@ -1087,7 +1270,7 @@ function BulkImportModal({ onCancel, onConfirm }) {
   );
 }
 
-function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAddSection, onUpdateSection, onRemoveSection, onAddCategory, onUpdateCategory, onRemoveCategory, onResetSettings }) {
+function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAddSection, onUpdateSection, onRemoveSection, onAddCategory, onUpdateCategory, onRemoveCategory, onResetSettings, backups, onRefreshBackups, onRestoreBackup, backupBusy }) {
   const [activeSection, setActiveSection] = useState(initialSection || settings.sections[0]?.name || '');
   const [newSection, setNewSection] = useState('');
   const [newCatName, setNewCatName] = useState('');
@@ -1272,9 +1455,55 @@ function SeriesHeaderBar({ entry, onToggle }) {
   return (
     <button type="button" className="series-header-bar" onClick={() => onToggle(entry.seriesId)}>
       <Link2 size={13} />
-      <span>{entry.seriesName} · {entry.count}편</span>
+      <span>{entry.seriesName} · {entry.movies?.length ?? entry.count}편</span>
       <span className="series-header-bar__collapse">접기 ▴</span>
     </button>
+  );
+}
+
+function ExpandedSeriesCardBlock({ entry, settings, onEdit, onFilter, onMoveToOwned, onAddSequel, onToggleSeries }) {
+  return (
+    <div className="series-expanded-block">
+      <SeriesHeaderBar entry={entry} onToggle={onToggleSeries} />
+      <div className="series-expanded-block__grid">
+        {entry.movies.map(m => (
+          <MovieCard
+            key={m.id}
+            movie={m}
+            settings={settings}
+            onEdit={onEdit}
+            onFilter={onFilter}
+            onMoveToOwned={onMoveToOwned}
+            onAddSequel={onAddSequel}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ExpandedSeriesGalleryBlock({ entry, onEdit, onToggleSeries }) {
+  return (
+    <div className="series-expanded-gallery-block">
+      <SeriesHeaderBar entry={entry} onToggle={onToggleSeries} />
+      <div className="series-expanded-gallery-block__grid">
+        {entry.movies.map(m => {
+          const sColor = m.seriesId ? seriesColor(m.seriesId) : null;
+          return (
+            <button key={m.id} type="button" className="poster-tile" onClick={() => onEdit(m)} title={m.titleKr}>
+              <div className="poster-tile__frame" style={sColor ? { borderTopColor: sColor, borderTopStyle: m.seriesUnofficial ? 'dashed' : 'solid' } : undefined}>
+                <Poster url={m.posterUrl} size="gallery" />
+                {m.status === 'wishlist' && <span className="poster-tile__wishlist-dot" title="위시리스트" />}
+                <div className="poster-tile__overlay">
+                  <span className="poster-tile__title">{m.titleKr}</span>
+                  <StarRating value={m.rating} readOnly size={10} />
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -1287,8 +1516,8 @@ function PosterGallery({ entries, onEdit, onToggleSeries }) {
         if (entry.type === 'series-bundle') {
           return <SeriesBundleTile key={entry.seriesId} entry={entry} onToggle={onToggleSeries} />;
         }
-        if (entry.type === 'series-header') {
-          return <SeriesHeaderBar key={`header-${entry.seriesId}`} entry={entry} onToggle={onToggleSeries} />;
+        if (entry.type === 'series-block') {
+          return <ExpandedSeriesGalleryBlock key={`series-${entry.seriesId}`} entry={entry} onEdit={onEdit} onToggleSeries={onToggleSeries} />;
         }
         const m = entry.movie;
         const sColor = m.seriesId ? seriesColor(m.seriesId) : null;
@@ -1337,7 +1566,7 @@ function SeriesBundleCard({ entry, onToggle }) {
   );
 }
 
-function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
+function MovieCard({ movie, settings, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
   const [expanded, setExpanded] = useState(false);
   const sColor = movie.seriesId ? seriesColor(movie.seriesId) : null;
   const hasMoreInfo = !!(movie.synopsis || movie.notes);
@@ -1439,12 +1668,21 @@ function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
             <span className="status-dot status-dot--wishlist">위시리스트</span>
           )}
           {movie.formats?.map(f => <span key={f} className="format-tag">{f}</span>)}
-          {movie.physicalLocation?.categoryName && (
-            <span className="location-tag">
-              <MapPin size={12} />
-              {movie.physicalLocation.section} · ({movie.physicalLocation.categoryNumber}) {movie.physicalLocation.categoryName}{movie.physicalLocation.itemNumber ? ` · ${movie.physicalLocation.itemNumber}번` : ''}
-            </span>
-          )}
+          {movie.physicalLocation?.categoryName && (() => {
+            const section = settings?.sections?.find(s => s.name === movie.physicalLocation.section);
+            const sectionNo = section?.number ?? '';
+            const categoryNo = movie.physicalLocation.categoryNumber ?? '';
+            const itemNo = movie.physicalLocation.itemNumber ?? '';
+            return (
+              <span className="location-tag location-tag--structured" title="보관 위치">
+                <MapPin size={12} />
+                <span className="location-part">{sectionNo ? `${sectionNo}.` : ''} {movie.physicalLocation.section}</span>
+                <span className="location-separator">›</span>
+                <span className="location-part">{categoryNo ? `(${categoryNo})` : ''} {movie.physicalLocation.categoryName}</span>
+                {itemNo && <><span className="location-separator">›</span><span className="location-part location-part--item">{itemNo}번</span></>}
+              </span>
+            );
+          })()}
           {movie.physicalLocation?.individual && (
             <span className="location-tag">
               <MapPin size={12} />
@@ -1515,6 +1753,15 @@ const APP_CSS = `
         .btn--ghost:hover { border-color: var(--gold); }
         .btn--danger { background: var(--accent); color: var(--paper); }
         .btn--danger-text { color: var(--accent); border-color: var(--line-dark); }
+        .backup-section { border-top: 1px solid var(--line); padding-top: 16px; }
+        .backup-actions { display: flex; justify-content: flex-end; margin: 8px 0; }
+        .backup-list { display: flex; flex-direction: column; gap: 7px; max-height: 260px; overflow: auto; }
+        .backup-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 9px; padding: 9px 10px; background: color-mix(in srgb, var(--paper) 72%, transparent); }
+        .backup-row__date { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+        .backup-row__meta { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
+        .save-status { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 10px; border-radius: 999px; font-size: 11.5px; color: var(--fg-soft); background: color-mix(in srgb, var(--fg) 6%, transparent); white-space: nowrap; }
+        .save-status.is-saving { color: var(--gold); background: color-mix(in srgb, var(--gold) 13%, transparent); }
+        .save-status__dot { width: 6px; height: 6px; border-radius: 50%; background: #6C8B5B; flex: 0 0 auto; }
         .icon-only-btn { background: transparent; border: 1px solid var(--line-dark); color: var(--fg); border-radius: 9px; padding: 8px; }
         .confirm-delete { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 
@@ -1561,6 +1808,12 @@ const APP_CSS = `
         .status-dot--wishlist { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
         .format-tag { font-size: 11px; color: var(--ink-soft); background: var(--paper-2); padding: 3px 9px; border-radius: 999px; }
         .location-tag { font-size: 11px; color: var(--ink-soft); display: inline-flex; align-items: center; gap: 3px; }
+        .location-tag--structured { gap: 5px; flex-wrap: wrap; line-height: 1.35; }
+        .location-part { display: inline-flex; align-items: baseline; gap: 3px; background: color-mix(in srgb, var(--gold) 9%, transparent); border-radius: 5px; padding: 2px 6px; }
+        .location-part b { font-size: 9px; font-weight: 700; letter-spacing: .02em; color: var(--gold); }
+        .location-part--item { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+        .location-part--item b { color: var(--accent); }
+        .location-separator { color: var(--ink-soft); opacity: .65; font-size: 12px; }
         .move-owned-btn { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 999px; padding: 4px 10px; }
         .move-owned-btn:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
         .series-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
@@ -1587,7 +1840,11 @@ const APP_CSS = `
         .poster-tile__title { color: #fff; font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .poster-tile__overlay .star-rating__bg { color: rgba(255,255,255,0.35); }
 
-        .series-header-bar { grid-column: 1 / -1; flex: 1 1 100%; display: flex; align-items: center; gap: 8px; background: color-mix(in srgb, var(--gold) 14%, transparent); border: 1px dashed color-mix(in srgb, var(--gold) 45%, transparent); color: var(--fg); border-radius: 10px; padding: 8px 14px; font-size: 12.5px; font-weight: 600; }
+        .series-header-bar { display: flex; align-items: center; gap: 8px; width: 100%; background: color-mix(in srgb, var(--gold) 14%, transparent); border: 1px dashed color-mix(in srgb, var(--gold) 45%, transparent); color: var(--fg); border-radius: 10px; padding: 8px 14px; font-size: 12.5px; font-weight: 600; }
+        .series-expanded-block { grid-column: 1 / -1; width: 100%; display: flex; flex-direction: column; gap: 10px; padding: 2px 0 4px; }
+        .series-expanded-block__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; padding-left: 10px; border-left: 2px solid color-mix(in srgb, var(--gold) 40%, transparent); }
+        .series-expanded-gallery-block { flex: 1 1 100%; width: 100%; display: flex; flex-direction: column; gap: 10px; padding: 2px 0 6px; }
+        .series-expanded-gallery-block__grid { display: flex; flex-wrap: wrap; gap: 12px; padding-left: 10px; border-left: 2px solid color-mix(in srgb, var(--gold) 40%, transparent); }
         .series-header-bar__collapse { margin-left: auto; font-weight: 600; opacity: 0.85; }
         .series-header-bar:hover { background: color-mix(in srgb, var(--gold) 22%, transparent); }
 
@@ -1671,6 +1928,14 @@ const APP_CSS = `
         .section-select-btn { flex: none; width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line); background: #fff; color: var(--accent); font-size: 12px; display: flex; align-items: center; justify-content: center; }
 `;
 
+function SaveStatus({ saving }) {
+  return (
+    <div className={`save-status${saving ? ' is-saving' : ''}`} aria-live="polite">
+      {saving ? <><Loader2 size={13} className="spin" /> 저장 중...</> : <><span className="save-status__dot" /> 저장됨</>}
+    </div>
+  );
+}
+
 function MovieCollectionApp() {
   const [loaded, setLoaded] = useState(false);
   const [movies, setMovies] = useState([]);
@@ -1693,6 +1958,48 @@ function MovieCollectionApp() {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState('');
+  const [savingCount, setSavingCount] = useState(0);
+  const [backups, setBackups] = useState([]);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const saving = savingCount > 0;
+
+  function beginSaving() { setSavingCount(v => v + 1); }
+  function endSaving() { setSavingCount(v => Math.max(0, v - 1)); }
+
+  async function refreshBackups() {
+    setBackupBusy(true);
+    try { setBackups(await listAutomaticBackups()); }
+    catch (e) { console.error(e); window.alert('⚠️ 백업 목록을 불러오지 못했어요.'); }
+    finally { setBackupBusy(false); }
+  }
+
+  async function makeBackupAfterSave(nextMovies, reason, snapshot = {}) {
+    try {
+      const nextBackups = await createAutomaticBackup({ movies: nextMovies, customFormats: snapshot.customFormats ?? customFormats, settings: snapshot.settings ?? settings, reason });
+      setBackups(prev => [{ ...nextBackups }, ...prev.filter(b => b.id !== nextBackups.id)].slice(0, BACKUP_LIMIT));
+    } catch (e) {
+      console.error('자동 백업 실패', e);
+      // 원본 저장은 이미 성공했으므로 백업 실패 때문에 사용자의 저장을 되돌리지 않는다.
+      window.alert('⚠️ 영화 저장은 완료됐지만 자동 백업을 만들지 못했어요. 다음 저장 때 다시 시도합니다.');
+    }
+  }
+
+  async function handleRestoreBackup(backup) {
+    const ok = window.confirm(`${new Date(backup.createdAt).toLocaleString('ko-KR')} 시점의 ${backup.count}편 데이터를 복구할까요?\n\n현재 영화 목록은 백업 시점의 목록으로 교체됩니다.`);
+    if (!ok) return;
+    beginSaving();
+    try {
+      const restored = await restoreAutomaticBackup(backup);
+      setMovies(restored.sort((a, b) => String(b.addedAt || '').localeCompare(String(a.addedAt || ''))));
+      setCustomFormats(backup.customFormats || []);
+      setSettings(backup.settings || DEFAULT_SETTINGS);
+      await refreshBackups();
+      window.alert('백업 복구가 완료됐어요.');
+    } catch (e) {
+      console.error(e);
+      window.alert('⚠️ 백업을 복구하지 못했어요. 현재 데이터는 그대로일 수 있습니다.');
+    } finally { endSaving(); }
+  }
 
   useEffect(() => {
     (async () => {
@@ -1740,17 +2047,36 @@ function MovieCollectionApp() {
       } catch (e) { setSettings(DEFAULT_SETTINGS); }
 
       setLoaded(true);
+      try { setBackups(await listAutomaticBackups()); } catch (e) { console.error('백업 목록 불러오기 실패', e); }
     })();
   }, []);
 
   async function persistCustomFormats(next) {
-    setCustomFormats(next);
-    try { await window.storage.set('custom-formats', JSON.stringify(next), false); } catch (e) { console.error(e); }
+    beginSaving();
+    try {
+      await window.storage.set('custom-formats', JSON.stringify(next), false);
+      setCustomFormats(next);
+      await makeBackupAfterSave(movies, '매체 목록 변경', { customFormats: next, settings });
+    } catch (e) {
+      console.error(e);
+      window.alert('⚠️ 매체 목록을 저장하지 못했어요. 기존 데이터는 변경하지 않았습니다.');
+    } finally {
+      endSaving();
+    }
   }
 
   async function persistSettings(next) {
-    setSettings(next);
-    try { await window.storage.set('settings', JSON.stringify(next), false); } catch (e) { console.error(e); }
+    beginSaving();
+    try {
+      await window.storage.set('settings', JSON.stringify(next), false);
+      setSettings(next);
+      await makeBackupAfterSave(movies, '설정 변경', { customFormats, settings: next });
+    } catch (e) {
+      console.error(e);
+      window.alert('⚠️ 설정을 저장하지 못했어요. 기존 설정은 변경하지 않았습니다.');
+    } finally {
+      endSaving();
+    }
   }
 
   function handleAddCustomFormat(value) {
@@ -1810,26 +2136,55 @@ function MovieCollectionApp() {
   }
 
   async function handleSaveMovie(movieData) {
-    try { await window.storage.set(`movie:${movieData.id}`, JSON.stringify(movieData), false); } catch (e) { console.error(e); }
-    setMovies(prev => {
-      const exists = prev.some(m => m.id === movieData.id);
-      return exists ? prev.map(m => m.id === movieData.id ? movieData : m) : [movieData, ...prev];
-    });
-    setFormOpen(false);
-    setEditingMovie(null);
+    beginSaving();
+    try {
+      await window.storage.set(`movie:${movieData.id}`, JSON.stringify(movieData), false);
+      const nextMovies = movies.some(m => m.id === movieData.id)
+        ? movies.map(m => m.id === movieData.id ? movieData : m)
+        : [movieData, ...movies];
+      setMovies(nextMovies);
+      await makeBackupAfterSave(nextMovies, movies.some(m => m.id === movieData.id) ? '영화 수정' : '영화 추가');
+      setFormOpen(false);
+      setEditingMovie(null);
+    } catch (e) {
+      console.error(e);
+      window.alert('⚠️ 영화를 저장하지 못했어요. 입력창은 그대로 두었습니다. 잠시 후 다시 저장해 주세요.');
+    } finally {
+      endSaving();
+    }
   }
 
   async function handleDeleteMovie(id) {
-    try { await window.storage.delete(`movie:${id}`, false); } catch (e) { console.error(e); }
-    setMovies(prev => prev.filter(m => m.id !== id));
-    setFormOpen(false);
-    setEditingMovie(null);
+    beginSaving();
+    try {
+      await window.storage.delete(`movie:${id}`, false);
+      const nextMovies = movies.filter(m => m.id !== id);
+      setMovies(nextMovies);
+      await makeBackupAfterSave(nextMovies, '영화 삭제');
+      setFormOpen(false);
+      setEditingMovie(null);
+    } catch (e) {
+      console.error(e);
+      window.alert('⚠️ 삭제를 완료하지 못했어요. 화면의 영화 정보는 그대로 유지했습니다.');
+    } finally {
+      endSaving();
+    }
   }
 
   async function handleMoveToOwned(movie) {
     const updated = { ...movie, status: 'owned' };
-    try { await window.storage.set(`movie:${updated.id}`, JSON.stringify(updated), false); } catch (e) { console.error(e); }
-    setMovies(prev => prev.map(m => m.id === updated.id ? updated : m));
+    beginSaving();
+    try {
+      await window.storage.set(`movie:${updated.id}`, JSON.stringify(updated), false);
+      const nextMovies = movies.map(m => m.id === updated.id ? updated : m);
+      setMovies(nextMovies);
+      await makeBackupAfterSave(nextMovies, '보유 상태 변경');
+    } catch (e) {
+      console.error(e);
+      window.alert('⚠️ 보유 상태 변경을 저장하지 못했어요.');
+    } finally {
+      endSaving();
+    }
   }
 
   function handleAddSequel(baseMovie) {
@@ -1841,11 +2196,31 @@ function MovieCollectionApp() {
   }
 
   async function handleBulkConfirm(newOnes) {
-    for (const m of newOnes) {
-      try { await window.storage.set(`movie:${m.id}`, JSON.stringify(m), false); } catch (e) { console.error(e); }
+    beginSaving();
+    const saved = [];
+    try {
+      for (const m of newOnes) {
+        try {
+          await window.storage.set(`movie:${m.id}`, JSON.stringify(m), false);
+          saved.push(m);
+        } catch (e) {
+          console.error(e);
+          break;
+        }
+      }
+      if (saved.length) {
+        const nextMovies = [...saved, ...movies];
+        setMovies(nextMovies);
+        await makeBackupAfterSave(nextMovies, '목록 일괄 등록');
+      }
+      if (saved.length === newOnes.length) {
+        setBulkOpen(false);
+      } else {
+        window.alert(`⚠️ ${newOnes.length}편 중 ${saved.length}편만 저장됐어요. 저장되지 않은 항목은 다시 시도해 주세요.`);
+      }
+    } finally {
+      endSaving();
     }
-    setMovies(prev => [...newOnes, ...prev]);
-    setBulkOpen(false);
   }
 
   function openFilter(type, value, label) {
@@ -1980,6 +2355,7 @@ function MovieCollectionApp() {
             <Search size={16} />
             <input placeholder="제목, 감독, 배우, 태그로 검색" value={search} onChange={e => { setSearch(e.target.value); setActiveFilter(null); }} />
           </div>
+          <SaveStatus saving={saving} />
           <div className="segmented segmented--view">
             <button type="button" className={viewMode === 'card' ? 'is-active' : ''} onClick={() => setViewMode('card')}>카드형</button>
             <button type="button" className={viewMode === 'gallery' ? 'is-active' : ''} onClick={() => setViewMode('gallery')}>진열장</button>
@@ -2028,11 +2404,20 @@ function MovieCollectionApp() {
               if (entry.type === 'series-bundle') {
                 return <SeriesBundleCard key={entry.seriesId} entry={entry} onToggle={handleToggleSeries} />;
               }
-              if (entry.type === 'series-header') {
-                return <SeriesHeaderBar key={`header-${entry.seriesId}`} entry={entry} onToggle={handleToggleSeries} />;
+              if (entry.type === 'series-block') {
+                return <ExpandedSeriesCardBlock
+                  key={`series-${entry.seriesId}`}
+                  entry={entry}
+                  settings={settings}
+                  onEdit={mv => { setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }}
+                  onFilter={openFilter}
+                  onMoveToOwned={handleMoveToOwned}
+                  onAddSequel={handleAddSequel}
+                  onToggleSeries={handleToggleSeries}
+                />;
               }
               const m = entry.movie;
-              return <MovieCard key={m.id} movie={m} onEdit={mv => { setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }} onFilter={openFilter} onMoveToOwned={handleMoveToOwned} onAddSequel={handleAddSequel} />;
+              return <MovieCard key={m.id} movie={m} settings={settings} onEdit={mv => { setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }} onFilter={openFilter} onMoveToOwned={handleMoveToOwned} onAddSequel={handleAddSequel} />;
             })}
           </div>
         )}
@@ -2066,10 +2451,11 @@ function MovieCollectionApp() {
           onAddSection={handleAddSection}
           onAddCategory={handleAddCategory}
           onManageSection={openSettingsForSection}
+          saving={saving}
         />
       )}
 
-      {bulkOpen && <BulkImportModal onCancel={() => setBulkOpen(false)} onConfirm={handleBulkConfirm} />}
+      {bulkOpen && <BulkImportModal onCancel={() => setBulkOpen(false)} onConfirm={handleBulkConfirm} saving={saving} />}
 
       {settingsOpen && (
         <SettingsModal
@@ -2084,6 +2470,10 @@ function MovieCollectionApp() {
           onUpdateCategory={handleUpdateCategory}
           onRemoveCategory={handleRemoveCategory}
           onResetSettings={handleResetSettings}
+          backups={backups}
+          onRefreshBackups={refreshBackups}
+          onRestoreBackup={handleRestoreBackup}
+          backupBusy={backupBusy}
         />
       )}
     </div>
