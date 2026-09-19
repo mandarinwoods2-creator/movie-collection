@@ -149,6 +149,24 @@ async function loadIndex() {
   return _indexLoadPromise;
 }
 
+// 인덱스에 항목을 더하거나 뺄 때는, 쓰기 직전에 클라우드의 '지금 이 순간' 최신 인덱스를
+// 다시 받아와 그 위에 이번 변경 하나만 얹어서 저장한다. 오래 열어둔 탭이 그사이 다른 기기가
+// 추가/삭제한 항목을 모른 채 인덱스를 통째로 덮어써서 사라지게 만드는 걸 막기 위함이다.
+async function withFreshIndex(mutate) {
+  let fresh;
+  try {
+    const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, { headers: jsonbinHeaders() });
+    const data = await res.json();
+    const record = (data && data.record && typeof data.record === 'object') ? data.record : {};
+    fresh = (record.index && typeof record.index === 'object') ? { ...record.index } : {};
+  } catch (e) {
+    fresh = _index ? { ..._index } : {};
+  }
+  mutate(fresh);
+  _index = fresh;
+  await saveIndex();
+}
+
 window.storage = {
   async get(key) {
     const index = await loadIndex();
@@ -163,8 +181,7 @@ window.storage = {
       await updateBin(index[key], value);
     } else {
       const binId = await createBin(value);
-      index[key] = binId;
-      await saveIndex();
+      await withFreshIndex(idx => { idx[key] = binId; });
     }
     return { key, value, shared: false };
   },
@@ -173,8 +190,7 @@ window.storage = {
     const binId = index[key];
     if (binId) {
       try { await fetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (e) { /* noop */ }
-      delete index[key];
-      await saveIndex();
+      await withFreshIndex(idx => { delete idx[key]; });
     }
     return { key, deleted: true, shared: false };
   },
