@@ -44,6 +44,10 @@ const { useState, useEffect, useMemo } = React;
 const JSONBIN_INDEX_ID = '6aa9a8e5ac6210605ad1f72d';
 const JSONBIN_BASE = 'https://api.jsonbin.io/v3/b';
 
+// JSONBin Master Key
+const JSONBIN_MASTER_KEY =
+  '$2a$10$I1gHud9/blySbfZeG5a/uNt3RMi9PwpWXMx1ZGRr27IeB44AdBiu';
+
 let _index = null; // { [key]: binId }
 let _indexLoadPromise = null;
 let _indexMutationQueue = Promise.resolve();
@@ -168,15 +172,27 @@ async function restoreAutomaticBackup(backup) {
   return restored;
 }
 function jsonbinHeaders(extra) {
-  return { 'Content-Type': 'application/json', ...(extra || {}) };
+  return {
+    'Content-Type': 'application/json',
+    'X-Master-Key': JSONBIN_MASTER_KEY,
+    ...(extra || {})
+  };
 }
 
 // JSONBin 무료 플랜의 429(rate limit)에 대응한다.
 // 여러 영화의 요청이 한꺼번에 몰려도 잠시 기다렸다가 자동 재시도하고,
 // 일반적인 오류는 그대로 반환한다. 최대 5회, 점점 간격을 늘린다.
+let _lastJsonBinRequestAt = 0;
+
 async function jsonbinFetch(url, options = {}) {
   let lastResponse = null;
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const gap = Date.now() - _lastJsonBinRequestAt;
+    if (gap < 500) {
+      await new Promise(resolve => setTimeout(resolve, 500 - gap));
+    }
+    _lastJsonBinRequestAt = Date.now();
+
     const res = await fetch(url, options);
     if (res.status !== 429) return res;
     lastResponse = res;
