@@ -88,7 +88,7 @@ async function createAutomaticBackup({ movies, customFormats, settings, reason =
       const movieBins = {};
       await runInBatches(movies, async movie => {
         movieBins[movie.id] = await createBin(JSON.stringify(movie));
-      }, 4);
+      }, 2);
       metaBinId = await createBin({
         id,
         createdAt,
@@ -119,8 +119,8 @@ async function createAutomaticBackup({ movies, customFormats, settings, reason =
           idx => { delete idx[key]; },
           idx => !Object.prototype.hasOwnProperty.call(idx, key)
         );
-        try { await fetch(`${JSONBIN_BASE}/${metaId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
-        await Promise.all(oldMovieBins.map(binId => fetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }).catch(() => null)));
+        try { await jsonbinFetch(`${JSONBIN_BASE}/${metaId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
+        await Promise.all(oldMovieBins.map(binId => jsonbinFetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }).catch(() => null)));
       } catch (_) {
         // 오래된 백업 정리는 best-effort
       }
@@ -156,7 +156,7 @@ async function restoreAutomaticBackup(backup) {
       const raw = await readBin(movieBins[id]);
       const movie = typeof raw === 'string' ? JSON.parse(raw) : raw;
       if (movie?.id) restored.push(movie);
-    }, 4);
+    }, 2);
   }
 
   const currentIndex = await fetchIndexFromCloud();
@@ -171,6 +171,24 @@ function jsonbinHeaders(extra) {
   return { 'Content-Type': 'application/json', ...(extra || {}) };
 }
 
+// JSONBin 무료 플랜의 429(rate limit)에 대응한다.
+// 여러 영화의 요청이 한꺼번에 몰려도 잠시 기다렸다가 자동 재시도하고,
+// 일반적인 오류는 그대로 반환한다. 최대 5회, 점점 간격을 늘린다.
+async function jsonbinFetch(url, options = {}) {
+  let lastResponse = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const res = await fetch(url, options);
+    if (res.status !== 429) return res;
+    lastResponse = res;
+    const retryAfter = Number(res.headers.get('Retry-After'));
+    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter * 1000, 8000)
+      : Math.min(1000 * Math.pow(2, attempt), 8000);
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+  }
+  return lastResponse;
+}
+
 function reportSaveFailure(status, body) {
   let msg = `클라우드 저장 실패 (${status})`;
   if (body && body.message) msg += `: ${body.message}`;
@@ -178,7 +196,7 @@ function reportSaveFailure(status, body) {
 }
 
 async function createBin(value, options = {}) {
-  const res = await fetch(JSONBIN_BASE, {
+  const res = await jsonbinFetch(JSONBIN_BASE, {
     method: 'POST',
     headers: jsonbinHeaders({ 'X-Bin-Private': 'true' }),
     body: JSON.stringify({ value }),
@@ -192,7 +210,7 @@ async function createBin(value, options = {}) {
 }
 
 async function updateBin(binId, value) {
-  const res = await fetch(`${JSONBIN_BASE}/${binId}`, {
+  const res = await jsonbinFetch(`${JSONBIN_BASE}/${binId}`, {
     method: 'PUT',
     headers: jsonbinHeaders(),
     body: JSON.stringify({ value }),
@@ -205,14 +223,14 @@ async function updateBin(binId, value) {
 }
 
 async function readBin(binId) {
-  const res = await fetch(`${JSONBIN_BASE}/${binId}/latest`, { headers: jsonbinHeaders() });
+  const res = await jsonbinFetch(`${JSONBIN_BASE}/${binId}/latest`, { headers: jsonbinHeaders() });
   if (!res.ok) throw new Error(`bin 읽기 실패 (${res.status})`);
   const data = await res.json();
   return data?.record?.value;
 }
 
 async function fetchIndexFromCloud() {
-  const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, {
+  const res = await jsonbinFetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, {
     headers: jsonbinHeaders(),
     cache: 'no-store',
   });
@@ -224,7 +242,7 @@ async function fetchIndexFromCloud() {
 }
 
 async function saveIndex(indexToSave) {
-  const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}`, {
+  const res = await jsonbinFetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}`, {
     method: 'PUT',
     headers: jsonbinHeaders(),
     body: JSON.stringify({ index: indexToSave }),
@@ -237,7 +255,7 @@ async function saveIndex(indexToSave) {
 }
 
 // 동시 요청이 너무 많으면 요율 제한에 걸릴 수 있어 일정 개수씩 나눠 처리한다.
-async function runInBatches(items, worker, batchSize = 8) {
+async function runInBatches(items, worker, batchSize = 2) {
   const results = [];
   for (let i = 0; i < items.length; i += batchSize) {
     const batch = items.slice(i, i + batchSize);
@@ -252,7 +270,7 @@ async function loadIndex() {
   if (_indexLoadPromise) return _indexLoadPromise;
 
   _indexLoadPromise = (async () => {
-    const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, {
+    const res = await jsonbinFetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, {
       headers: jsonbinHeaders(),
       cache: 'no-store',
     });
@@ -342,7 +360,7 @@ window.storage = {
         );
       } catch (e) {
         // 인덱스 연결에 실패한 고아 bin은 정리 시도. 실패해도 기존 데이터에는 영향 없음.
-        try { await fetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
+        try { await jsonbinFetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
         throw e;
       }
     }
@@ -359,7 +377,7 @@ window.storage = {
       idx => { delete idx[key]; },
       idx => !Object.prototype.hasOwnProperty.call(idx, key)
     );
-    try { await fetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
+    try { await jsonbinFetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
     return { key, deleted: true, shared: false };
   },
 
