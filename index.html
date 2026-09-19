@@ -43,8 +43,11 @@ const { useState, useEffect, useMemo } = React;
 // 이 URL을 공개적으로 퍼뜨리지 않는 걸 권장해요.
 // ---------------------------------------------------------------
 const JSONBIN_INDEX_ID = '6aa9a8e5ac6210605ad1f72d';
-const JSONBIN_KEY = '$2a$10$I1gHud9/blySbfZeGq5a/uNt3RMi9PwpWXMx1ZGRr27IeB44AdBiu';
-const JSONBIN_BASE = 'https://api.jsonbin.io/v3/b';
+// JSONBin은 GitHub Pages에서 직접 호출하지 않습니다.
+// 아래 주소는 함께 제공되는 Cloudflare Worker의 URL로 바꿔주세요.
+const JSONBIN_PROXY_BASE = 'https://shrill-moon-5ad5.mandarinwoods2.workers.dev/v3/b';
+const JSONBIN_BASE = JSONBIN_PROXY_BASE;
+const JSONBIN_KEY = ''; // Master Key는 Worker의 Secret에만 보관합니다.
 
 let _index = null; // { [key]: binId }
 let _indexLoadPromise = null;
@@ -156,7 +159,7 @@ async function restoreAutomaticBackup(backup) {
 }
 
 function jsonbinHeaders(extra) {
-  return { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_KEY, ...(extra || {}) };
+  return { 'Content-Type': 'application/json', ...(extra || {}) };
 }
 
 function reportSaveFailure(status, body) {
@@ -272,7 +275,7 @@ async function fetchJsonBin(url, options = {}, label = 'JSONBin') {
     }
   }
   if (lastError?.message === 'Failed to fetch' || lastError?.name === 'TypeError') {
-    throw new Error(`${label}에 연결할 수 없습니다. 브라우저가 api.jsonbin.io 요청을 차단했거나 네트워크/DNS 연결에 문제가 있을 수 있습니다.`);
+    throw new Error(`${label}에 연결할 수 없습니다. 데이터 중계 서버 또는 네트워크 연결을 확인해주세요.`);
   }
   throw lastError || new Error(`${label} 요청 실패`);
 }
