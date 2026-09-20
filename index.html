@@ -421,7 +421,6 @@ const PlusCircle = makeIcon(<><circle cx="12" cy="12" r="10" /><line x1="12" y1=
 
 
 const DEFAULT_FORMATS = ['DVD', '블루레이', '왓챠', 'Apple TV', '쿠팡플레이', 'Youtube', '씨네폭스'];
-const UNCLASSIFIED_FORMAT = '미분류';
 const PHYSICAL_FORMATS = ['DVD', '블루레이'];
 
 const THEMES = {
@@ -1257,6 +1256,28 @@ function BulkImportModal({ onCancel, onConfirm, saving }) {
             </div>
           )}
 
+          <div className="field backup-section">
+            <span>자동 백업</span>
+            <p className="hint-text-small">저장에 성공할 때마다 현재 영화 목록과 설정을 별도 백업하고, 최근 10개를 유지해요. 복구해도 백업 자체는 삭제되지 않아요.</p>
+            <div className="backup-actions">
+              <button type="button" className="btn btn--ghost btn--sm" onClick={onRefreshBackups} disabled={backupBusy}>
+                {backupBusy ? <><Loader2 size={13} className="spin" /> 확인 중...</> : '백업 새로고침'}
+              </button>
+            </div>
+            <div className="backup-list">
+              {backups.length === 0 ? <div className="hint-text-small">아직 자동 백업이 없어요. 다음 저장부터 자동으로 만들어집니다.</div> : backups.map(b => (
+                <div className="backup-row" key={b.id}>
+                  <div>
+                    <div className="backup-row__date">{new Date(b.createdAt).toLocaleString('ko-KR')}</div>
+                    <div className="backup-row__meta">{b.count}편 · {b.reason || '저장'}</div>
+                  </div>
+                  <button type="button" className="btn btn--ghost btn--sm" onClick={() => onRestoreBackup(b)} disabled={backupBusy}>
+                    <RotateCcw size={13} /> 복구
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
         <div className="drawer__foot">
           <div />
@@ -1721,7 +1742,11 @@ const APP_CSS = `
         .filter-banner b { font-weight: 700; }
         .filter-banner button { margin-left: auto; background: transparent; border: 1px solid var(--line-dark); color: var(--fg); border-radius: 8px; padding: 4px 10px; font-size: 12.5px; }
 
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; align-items: start; }
+        /* 카드 높이는 같은 행의 다른 카드에 맞춰 늘어나지 않도록 한다.
+           줄거리/메모를 펼쳐도 옆 카드가 함께 뚱뚱해지지 않는다. */
+        .grid > .card { align-self: start; }
+        .grid > .series-bundle-card { align-self: start; height: auto; }
         .pagination { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--line-dark); }
         .pagination__info { font-size: 13px; color: var(--fg-soft); font-variant-numeric: tabular-nums; }
         .pagination__size { margin-left: 8px; }
@@ -1751,7 +1776,7 @@ const APP_CSS = `
         .more-info__toggle.is-open:hover { transform: rotate(180deg) scale(1.1); }
         .more-info__body { font-size: 12.5px; color: var(--ink); line-height: 1.5; display: flex; flex-direction: column; gap: 10px; background: var(--paper-2); border-radius: 8px; padding: 10px 12px; margin-top: 2px; }
         .more-info__block { display: flex; flex-direction: column; gap: 3px; }
-        .more-info__block p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .more-info__block p { margin: 0; }
         .more-info__block b { color: var(--ink-soft); font-weight: 700; font-size: 11px; }
 
         .card__bottom { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 2px; padding-top: 9px; border-top: 1px solid var(--line); }
@@ -2178,34 +2203,17 @@ function MovieCollectionApp() {
     return [...DEFAULT_FORMATS, ...extra];
   }, [customFormats]);
 
-  const formatFilterOptions = useMemo(() => [...allFormatOptions, UNCLASSIFIED_FORMAT], [allFormatOptions]);
-
   const formatCounts = useMemo(() => {
     const counts = {};
-    for (const f of formatFilterOptions) counts[f] = 0;
-    for (const m of movies) {
-      const formats = Array.isArray(m.formats) ? m.formats.filter(Boolean) : [];
-      if (formats.length === 0) {
-        counts[UNCLASSIFIED_FORMAT] += 1;
-      } else {
-        for (const f of formats) counts[f] = (counts[f] || 0) + 1;
-      }
-    }
+    for (const f of allFormatOptions) counts[f] = 0;
+    for (const m of movies) for (const f of m.formats || []) counts[f] = (counts[f] || 0) + 1;
     return counts;
-  }, [movies, formatFilterOptions]);
+  }, [movies, allFormatOptions]);
 
   const filteredMovies = useMemo(() => {
     let list = movies.filter(m => {
       if (statusFilter !== 'all' && m.status !== statusFilter) return false;
-      if (formatFilter.length > 0) {
-        const formats = Array.isArray(m.formats) ? m.formats.filter(Boolean) : [];
-        const matchesFormat = formatFilter.some(f =>
-          f === UNCLASSIFIED_FORMAT
-            ? formats.length === 0
-            : formats.includes(f)
-        );
-        if (!matchesFormat) return false;
-      }
+      if (formatFilter.length > 0 && !(m.formats || []).some(f => formatFilter.includes(f))) return false;
       if (activeFilter) {
         const { type, value } = activeFilter;
         if (type === 'person') { if (!(m.director === value || (m.actors || []).includes(value))) return false; }
@@ -2298,7 +2306,7 @@ function MovieCollectionApp() {
         <div className="sidebar-section">
           <h3>매체 / 플랫폼</h3>
           <div className="format-filter-list">
-            {formatFilterOptions.map(f => (
+            {allFormatOptions.map(f => (
               <div key={f} className={`format-filter-item${formatFilter.includes(f) ? ' is-active' : ''}`}>
                 <label>
                   <input type="checkbox" checked={formatFilter.includes(f)} onChange={() => setFormatFilter(prev => prev.includes(f) ? prev.filter(x => x !== f) : [...prev, f])} />
