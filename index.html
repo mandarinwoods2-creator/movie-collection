@@ -1017,7 +1017,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
             <span>보유 상태</span>
             <div className="segmented">
               <button type="button" className={status === 'owned' ? 'is-active' : ''} onClick={() => setStatus('owned')}>보유</button>
-              <button type="button" className={status === 'wishlist' ? 'is-active' : ''} onClick={() => setStatus('wishlist')}>위시리스트</button>
+              <button type="button" className={status === 'wishlist' ? 'is-active' : ''} onClick={() => setStatus('wishlist')}>미보유</button>
             </div>
           </div>
 
@@ -1512,7 +1512,7 @@ function PosterMovieTile({ movie, onEdit }) {
         style={sColor ? { borderTopColor: sColor, borderTopStyle: movie.seriesUnofficial ? 'dashed' : 'solid' } : undefined}
       >
         <Poster url={movie.posterUrl} size="gallery" />
-        {movie.status === 'wishlist' && <span className="poster-tile__wishlist-dot" title="위시리스트" />}
+        {movie.status === 'wishlist' && <span className="poster-tile__wishlist-dot" title="미보유" />}
         <div className="poster-tile__overlay">
           <span className="poster-tile__title">{movie.titleKr}</span>
           <StarRating value={movie.rating} readOnly size={10} />
@@ -1687,7 +1687,7 @@ function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
 
         <div className="card__bottom">
           {movie.status === 'wishlist' && (
-            <span className="status-dot status-dot--wishlist">위시리스트</span>
+            <span className="status-dot status-dot--wishlist">미보유</span>
           )}
           {movie.formats?.map(f => <span key={f} className="format-tag">{f}</span>)}
           {movie.physicalLocation?.categoryName && (
@@ -2330,7 +2330,7 @@ function MovieCollectionApp() {
         <div className="sidebar-top">
           <div>
             <h1 className="brand-title">영화 컬렉션</h1>
-            <div className="brand-stats">보유 {ownedCount}편 · 위시리스트 {wishlistCount}편</div>
+            <div className="brand-stats">보유 {ownedCount}편 · 미보유 {wishlistCount}편</div>
           </div>
           <button type="button" className="icon-only-btn" onClick={() => setSettingsOpen(true)} title="설정">
             <SettingsIcon size={16} />
@@ -2342,7 +2342,7 @@ function MovieCollectionApp() {
           <div className="segmented">
             <button type="button" className={statusFilter === 'all' ? 'is-active' : ''} onClick={() => setStatusFilter('all')}>전체</button>
             <button type="button" className={statusFilter === 'owned' ? 'is-active' : ''} onClick={() => setStatusFilter('owned')}>보유</button>
-            <button type="button" className={statusFilter === 'wishlist' ? 'is-active' : ''} onClick={() => setStatusFilter('wishlist')}>위시리스트</button>
+            <button type="button" className={statusFilter === 'wishlist' ? 'is-active' : ''} onClick={() => setStatusFilter('wishlist')}>미보유</button>
           </div>
         </div>
         <hr />
