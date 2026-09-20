@@ -607,8 +607,15 @@ function buildDisplayEntries(list, expandedSeries) {
         .sort((a, b) => (Number(a.seriesOrder) || 0) - (Number(b.seriesOrder) || 0));
       group.forEach(g => seen.add(g.id));
       if (expandedSeries.has(m.seriesId)) {
-        entries.push({ type: 'series-header', seriesId: m.seriesId, seriesName: m.seriesName, count: group.length });
-        group.forEach(g => entries.push({ type: 'movie', movie: g }));
+        // 펼친 시리즈는 하나의 독립 블록으로 묶는다.
+        // 뒤의 일반 영화가 같은 줄에 끼어들지 않게 하기 위함이다.
+        entries.push({
+          type: 'series-expanded',
+          seriesId: m.seriesId,
+          seriesName: m.seriesName,
+          count: group.length,
+          movies: group,
+        });
       } else {
         entries.push({ type: 'series-bundle', seriesId: m.seriesId, seriesName: m.seriesName, movies: group });
       }
@@ -1491,6 +1498,41 @@ function SeriesHeaderBar({ entry, onToggle }) {
 
 // 포스터만 촘촘히 진열한 '진열장' 뷰. 시리즈는 항상 이어서 배치되고,
 // 접혀있으면 묶음 타일 하나로, 펼쳐져 있으면 구분줄 + 개별 포스터로 보인다.
+function PosterMovieTile({ movie, onEdit }) {
+  const sColor = movie.seriesId ? seriesColor(movie.seriesId) : null;
+  return (
+    <button
+      type="button"
+      className="poster-tile"
+      onClick={() => onEdit(movie)}
+      title={movie.titleKr}
+    >
+      <div
+        className="poster-tile__frame"
+        style={sColor ? { borderTopColor: sColor, borderTopStyle: movie.seriesUnofficial ? 'dashed' : 'solid' } : undefined}
+      >
+        <Poster url={movie.posterUrl} size="gallery" />
+        {movie.status === 'wishlist' && <span className="poster-tile__wishlist-dot" title="위시리스트" />}
+        <div className="poster-tile__overlay">
+          <span className="poster-tile__title">{movie.titleKr}</span>
+          <StarRating value={movie.rating} readOnly size={10} />
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function SeriesExpandedGalleryBlock({ entry, onEdit, onToggle }) {
+  return (
+    <div className="series-expanded-gallery-block">
+      <SeriesHeaderBar entry={entry} onToggle={onToggle} />
+      <div className="series-expanded-gallery-row">
+        {entry.movies.map(m => <PosterMovieTile key={m.id} movie={m} onEdit={onEdit} />)}
+      </div>
+    </div>
+  );
+}
+
 function PosterGallery({ entries, onEdit, onToggleSeries }) {
   return (
     <div className="poster-gallery">
@@ -1498,32 +1540,10 @@ function PosterGallery({ entries, onEdit, onToggleSeries }) {
         if (entry.type === 'series-bundle') {
           return <SeriesBundleTile key={entry.seriesId} entry={entry} onToggle={onToggleSeries} />;
         }
-        if (entry.type === 'series-header') {
-          return <SeriesHeaderBar key={`header-${entry.seriesId}`} entry={entry} onToggle={onToggleSeries} />;
+        if (entry.type === 'series-expanded') {
+          return <SeriesExpandedGalleryBlock key={`expanded-${entry.seriesId}`} entry={entry} onEdit={onEdit} onToggle={onToggleSeries} />;
         }
-        const m = entry.movie;
-        const sColor = m.seriesId ? seriesColor(m.seriesId) : null;
-        return (
-          <button
-            key={m.id}
-            type="button"
-            className="poster-tile"
-            onClick={() => onEdit(m)}
-            title={m.titleKr}
-          >
-            <div
-              className="poster-tile__frame"
-              style={sColor ? { borderTopColor: sColor, borderTopStyle: m.seriesUnofficial ? 'dashed' : 'solid' } : undefined}
-            >
-              <Poster url={m.posterUrl} size="gallery" />
-              {m.status === 'wishlist' && <span className="poster-tile__wishlist-dot" title="위시리스트" />}
-              <div className="poster-tile__overlay">
-                <span className="poster-tile__title">{m.titleKr}</span>
-                <StarRating value={m.rating} readOnly size={10} />
-              </div>
-            </div>
-          </button>
-        );
+        return <PosterMovieTile key={entry.movie.id} movie={entry.movie} onEdit={onEdit} />;
       })}
     </div>
   );
@@ -1545,6 +1565,26 @@ function SeriesBundleCard({ entry, onToggle }) {
       </div>
       <span className="series-bundle-card__chevron">▾</span>
     </button>
+  );
+}
+
+function SeriesExpandedCardBlock({ entry, onToggle, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
+  return (
+    <div className="series-expanded-card-block">
+      <SeriesHeaderBar entry={entry} onToggle={onToggle} />
+      <div className="series-expanded-card-grid">
+        {entry.movies.map(m => (
+          <MovieCard
+            key={m.id}
+            movie={m}
+            onEdit={onEdit}
+            onFilter={onFilter}
+            onMoveToOwned={onMoveToOwned}
+            onAddSequel={onAddSequel}
+          />
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1742,18 +1782,14 @@ const APP_CSS = `
         .filter-banner b { font-weight: 700; }
         .filter-banner button { margin-left: auto; background: transparent; border: 1px solid var(--line-dark); color: var(--fg); border-radius: 8px; padding: 4px 10px; font-size: 12.5px; }
 
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; align-items: start; }
-        /* 카드 높이는 같은 행의 다른 카드에 맞춰 늘어나지 않도록 한다.
-           줄거리/메모를 펼쳐도 옆 카드가 함께 뚱뚱해지지 않는다. */
-        .grid > .card { align-self: start; }
-        .grid > .series-bundle-card { align-self: start; height: auto; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
         .pagination { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--line-dark); }
         .pagination__info { font-size: 13px; color: var(--fg-soft); font-variant-numeric: tabular-nums; }
         .pagination__size { margin-left: 8px; }
         .empty-state { text-align: center; padding: 80px 20px; color: var(--fg-soft); }
         .empty-state h3 { font-family: Georgia, "Apple SD Gothic Neo", serif; font-size: 20px; color: var(--fg); margin-bottom: 8px; }
 
-        .card { display: flex; gap: 12px; background: var(--paper); border-radius: 12px; padding: 12px; }
+        .card { display: flex; gap: 12px; background: var(--paper); border-radius: 12px; padding: 12px; position: relative; }
         .card__body { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
         .card__top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
         .card__title { display: flex; flex-direction: column; min-width: 0; }
@@ -1774,9 +1810,10 @@ const APP_CSS = `
         .more-info__toggle:hover { background: color-mix(in srgb, var(--gold) 34%, transparent); transform: scale(1.1); }
         .more-info__toggle.is-open { transform: rotate(180deg); }
         .more-info__toggle.is-open:hover { transform: rotate(180deg) scale(1.1); }
-        .more-info__body { font-size: 12.5px; color: var(--ink); line-height: 1.5; display: flex; flex-direction: column; gap: 10px; background: var(--paper-2); border-radius: 8px; padding: 10px 12px; margin-top: 2px; }
+        .more-info { position: relative; }
+        .more-info__body { position: absolute; top: 34px; left: 0; right: 0; z-index: 30; max-height: 230px; overflow-y: auto; font-size: 12.5px; color: var(--ink); line-height: 1.5; display: flex; flex-direction: column; gap: 10px; background: var(--paper-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; box-shadow: 0 10px 24px rgba(0,0,0,0.18); }
         .more-info__block { display: flex; flex-direction: column; gap: 3px; }
-        .more-info__block p { margin: 0; }
+        .more-info__block p { margin: 0; white-space: pre-wrap; }
         .more-info__block b { color: var(--ink-soft); font-weight: 700; font-size: 11px; }
 
         .card__bottom { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 2px; padding-top: 9px; border-top: 1px solid var(--line); }
@@ -1815,12 +1852,18 @@ const APP_CSS = `
         .series-header-bar__collapse { margin-left: auto; font-weight: 600; opacity: 0.85; }
         .series-header-bar:hover { background: color-mix(in srgb, var(--gold) 22%, transparent); }
 
-        .series-bundle-card { display: flex; align-items: center; gap: 12px; padding: 12px; text-align: left; cursor: pointer; }
+        .series-bundle-card { grid-column: 1 / -1; width: 100%; min-height: 108px; max-height: 108px; display: flex; align-items: center; gap: 14px; padding: 12px 16px; text-align: left; cursor: pointer; border: 1px solid color-mix(in srgb, var(--gold) 55%, var(--line)); background: color-mix(in srgb, var(--paper) 92%, var(--gold)); }
         .series-bundle-card__poster-wrap { position: relative; flex-shrink: 0; }
         .series-bundle-card__count { position: absolute; bottom: 5px; left: 5px; background: var(--gold); color: var(--bg); font-size: 10px; font-weight: 700; border-radius: 999px; padding: 2px 7px; }
         .series-bundle-card__info { flex: 1; min-width: 0; gap: 4px; }
         .series-bundle-card__years { font-size: 12px; color: var(--ink-soft); }
         .series-bundle-card__chevron { flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%; background: color-mix(in srgb, var(--gold) 16%, transparent); color: var(--gold); font-size: 16px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+        .series-expanded-card-block { grid-column: 1 / -1; display: block; border: 1px solid color-mix(in srgb, var(--gold) 38%, transparent); border-radius: 12px; padding: 10px; background: color-mix(in srgb, var(--gold) 6%, transparent); }
+        .series-expanded-card-block > .series-header-bar { width: 100%; margin-bottom: 10px; }
+        .series-expanded-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+        .series-expanded-gallery-block { flex: 1 0 100%; width: 100%; border: 1px solid color-mix(in srgb, var(--gold) 38%, transparent); border-radius: 10px; padding: 10px; background: color-mix(in srgb, var(--gold) 6%, transparent); }
+        .series-expanded-gallery-block > .series-header-bar { width: 100%; margin-bottom: 10px; }
+        .series-expanded-gallery-row { display: flex; flex-wrap: wrap; gap: 12px; }
 
         .poster-bundle-tile__count { position: absolute; bottom: 6px; left: 6px; background: var(--gold); color: var(--bg); font-size: 10.5px; font-weight: 700; border-radius: 999px; padding: 2px 8px; }
 
@@ -2374,8 +2417,18 @@ function MovieCollectionApp() {
               if (entry.type === 'series-bundle') {
                 return <SeriesBundleCard key={entry.seriesId} entry={entry} onToggle={handleToggleSeries} />;
               }
-              if (entry.type === 'series-header') {
-                return <SeriesHeaderBar key={`header-${entry.seriesId}`} entry={entry} onToggle={handleToggleSeries} />;
+              if (entry.type === 'series-expanded') {
+                return (
+                  <SeriesExpandedCardBlock
+                    key={`expanded-${entry.seriesId}`}
+                    entry={entry}
+                    onToggle={handleToggleSeries}
+                    onEdit={mv => { setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }}
+                    onFilter={openFilter}
+                    onMoveToOwned={handleMoveToOwned}
+                    onAddSequel={handleAddSequel}
+                  />
+                );
               }
               const m = entry.movie;
               return <MovieCard key={m.id} movie={m} onEdit={mv => { setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }} onFilter={openFilter} onMoveToOwned={handleMoveToOwned} onAddSequel={handleAddSequel} />;
