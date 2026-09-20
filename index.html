@@ -38,179 +38,43 @@ const { useState, useEffect, useMemo } = React;
 // 이러면 저장할 때마다 오가는 데이터가 항상 작아서 100KB에 걸릴 일이
 // 거의 없다.
 //
-// 저장/조회는 Cloudflare Worker를 통해 처리합니다.
-// Master Key는 Worker 내부에서만 사용하므로 이 페이지에는 넣지 않습니다.
+// 주의: 아래 X-Master-Key는 이 페이지 소스에 그대로 노출돼요.
+// 개인 영화 컬렉션처럼 민감하지 않은 용도로만 쓰시고,
+// 이 URL을 공개적으로 퍼뜨리지 않는 걸 권장해요.
 // ---------------------------------------------------------------
 const JSONBIN_INDEX_ID = '6aa9a8e5ac6210605ad1f72d';
-const JSONBIN_BASE = 'https://shrill-moon-5ad5.mandarinwoods2.workers.dev/v3/b';
+const JSONBIN_KEY = '$2a$10$I1gHud9/blySbfZeGq5a/uNt3RMi9PwpWXMx1ZGRr27IeB44AdBiu';
+const JSONBIN_BASE = 'https://api.jsonbin.io/v3/b';
 
 let _index = null; // { [key]: binId }
 let _indexLoadPromise = null;
-let _indexMutationQueue = Promise.resolve();
 
-// ---------------------------------------------------------------
-// 자동 백업
-// 최근 10개의 백업을 JSONBin에 별도로 보관한다. 백업은 현재 영화 bin을
-// 재사용하지 않고 각 영화의 내용을 별도 bin으로 복제하므로, 이후 영화가
-// 수정/삭제되어도 과거 백업이 영향을 받지 않는다.
-// ---------------------------------------------------------------
-const BACKUP_PREFIX = 'backup:';
-const BACKUP_LIMIT = 10;
-let _backupQueue = Promise.resolve();
-
-function makeBackupId() {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-async function createAutomaticBackup({ movies, customFormats, settings, reason = '저장' }) {
-  const job = _backupQueue.then(async () => {
-    const id = makeBackupId();
-    const createdAt = new Date().toISOString();
-
-    // 백업 1개를 1개의 bin으로 저장해 요청 수를 최소화한다.
-    // 영화가 많아져 100KB를 넘는 경우에는 기존의 영화별 백업 방식으로
-    // 자동 전환한다.
-    const snapshot = {
-      id,
-      createdAt,
-      reason,
-      count: movies.length,
-      customFormats: Array.isArray(customFormats) ? customFormats : [],
-      settings: settings || DEFAULT_SETTINGS,
-      movies,
-    };
-
-    let metaBinId;
-    try {
-      metaBinId = await createBin(snapshot, { report: false });
-    } catch (firstError) {
-      // 큰 컬렉션은 영화별 복사 방식으로 백업한다.
-      const movieBins = {};
-      await runInBatches(movies, async movie => {
-        movieBins[movie.id] = await createBin(JSON.stringify(movie));
-      }, 2);
-      metaBinId = await createBin({
-        id,
-        createdAt,
-        reason,
-        count: movies.length,
-        customFormats: Array.isArray(customFormats) ? customFormats : [],
-        settings: settings || DEFAULT_SETTINGS,
-        movieBins,
-      });
-    }
-
-    await queueIndexMutation(
-      idx => { idx[`${BACKUP_PREFIX}${id}`] = metaBinId; },
-      idx => idx[`${BACKUP_PREFIX}${id}`] === metaBinId
-    );
-
-    const index = await fetchIndexFromCloud();
-    const backupEntries = Object.entries(index || {})
-      .filter(([key]) => key.startsWith(BACKUP_PREFIX))
-      .sort((a, b) => a[0].slice(BACKUP_PREFIX.length).localeCompare(b[0].slice(BACKUP_PREFIX.length)));
-
-    const old = backupEntries.slice(0, Math.max(0, backupEntries.length - BACKUP_LIMIT));
-    for (const [key, metaId] of old) {
-      try {
-        const oldMeta = await readBin(metaId);
-        const oldMovieBins = oldMeta?.movieBins ? Object.values(oldMeta.movieBins) : [];
-        await queueIndexMutation(
-          idx => { delete idx[key]; },
-          idx => !Object.prototype.hasOwnProperty.call(idx, key)
-        );
-        try { await jsonbinFetch(`${JSONBIN_BASE}/${metaId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
-        await Promise.all(oldMovieBins.map(binId => jsonbinFetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }).catch(() => null)));
-      } catch (_) {
-        // 오래된 백업 정리는 best-effort
-      }
-    }
-
-    return { id, createdAt, count: movies.length, reason };
-  });
-  _backupQueue = job.catch(() => {});
-  return job;
-}
-async function listAutomaticBackups() {
-  const index = await fetchIndexFromCloud();
-  const entries = Object.entries(index || {}).filter(([key]) => key.startsWith(BACKUP_PREFIX));
-  const result = [];
-  for (const [key, metaBinId] of entries) {
-    try {
-      const meta = await readBin(metaBinId);
-      if (meta?.id) result.push({ ...meta, metaBinId });
-    } catch (_) {}
-  }
-  return result.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, BACKUP_LIMIT);
-}
-
-async function restoreAutomaticBackup(backup) {
-  let restored = [];
-
-  if (Array.isArray(backup?.movies)) {
-    restored = backup.movies;
-  } else {
-    const movieBins = backup?.movieBins || {};
-    const ids = Object.keys(movieBins);
-    await runInBatches(ids, async id => {
-      const raw = await readBin(movieBins[id]);
-      const movie = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      if (movie?.id) restored.push(movie);
-    }, 2);
-  }
-
-  const currentIndex = await fetchIndexFromCloud();
-  const currentMovieKeys = Object.keys(currentIndex || {}).filter(k => k.startsWith('movie:'));
-  for (const key of currentMovieKeys) await window.storage.delete(key);
-  for (const movie of restored) await window.storage.set(`movie:${movie.id}`, JSON.stringify(movie));
-  await window.storage.set('custom-formats', JSON.stringify(backup.customFormats || []));
-  await window.storage.set('settings', JSON.stringify(backup.settings || DEFAULT_SETTINGS));
-  return restored;
-}
 function jsonbinHeaders(extra) {
-  return { 'Content-Type': 'application/json', ...(extra || {}) };
-}
-
-// JSONBin 무료 플랜의 429(rate limit)에 대응한다.
-// 여러 영화의 요청이 한꺼번에 몰려도 잠시 기다렸다가 자동 재시도하고,
-// 일반적인 오류는 그대로 반환한다. 최대 5회, 점점 간격을 늘린다.
-async function jsonbinFetch(url, options = {}) {
-  let lastResponse = null;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const res = await fetch(url, options);
-    if (res.status !== 429) return res;
-    lastResponse = res;
-    const retryAfter = Number(res.headers.get('Retry-After'));
-    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
-      ? Math.min(retryAfter * 1000, 8000)
-      : Math.min(1000 * Math.pow(2, attempt), 8000);
-    await new Promise(resolve => setTimeout(resolve, waitMs));
-  }
-  return lastResponse;
+  return { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_KEY, ...(extra || {}) };
 }
 
 function reportSaveFailure(status, body) {
   let msg = `클라우드 저장 실패 (${status})`;
   if (body && body.message) msg += `: ${body.message}`;
-  window.alert('⚠️ ' + msg + '\n변경사항을 저장하지 못했어요. 기존 데이터는 그대로 유지됩니다.');
+  window.alert('⚠️ ' + msg + '\n방금 한 변경사항이 다른 기기에는 반영되지 않았을 수 있어요.');
 }
 
-async function createBin(value, options = {}) {
-  const res = await jsonbinFetch(JSONBIN_BASE, {
+async function createBin(value) {
+  const res = await fetch(JSONBIN_BASE, {
     method: 'POST',
     headers: jsonbinHeaders({ 'X-Bin-Private': 'true' }),
     body: JSON.stringify({ value }),
   });
   const data = await res.json().catch(() => null);
   if (!res.ok || !data?.metadata?.id) {
-    if (options.report !== false) reportSaveFailure(res.status, data);
+    reportSaveFailure(res.status, data);
     throw new Error('bin 생성 실패');
   }
   return data.metadata.id;
 }
 
 async function updateBin(binId, value) {
-  const res = await jsonbinFetch(`${JSONBIN_BASE}/${binId}`, {
+  const res = await fetch(`${JSONBIN_BASE}/${binId}`, {
     method: 'PUT',
     headers: jsonbinHeaders(),
     body: JSON.stringify({ value }),
@@ -223,29 +87,17 @@ async function updateBin(binId, value) {
 }
 
 async function readBin(binId) {
-  const res = await jsonbinFetch(`${JSONBIN_BASE}/${binId}/latest`, { headers: jsonbinHeaders() });
-  if (!res.ok) throw new Error(`bin 읽기 실패 (${res.status})`);
+  const res = await fetch(`${JSONBIN_BASE}/${binId}/latest`, { headers: jsonbinHeaders() });
+  if (!res.ok) throw new Error('bin 읽기 실패');
   const data = await res.json();
   return data?.record?.value;
 }
 
-async function fetchIndexFromCloud() {
-  const res = await jsonbinFetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, {
-    headers: jsonbinHeaders(),
-    cache: 'no-store',
-  });
-  if (!res.ok) throw new Error(`인덱스 읽기 실패 (${res.status})`);
-  const data = await res.json();
-  const record = (data && data.record && typeof data.record === 'object') ? data.record : {};
-  if (record.index && typeof record.index === 'object') return { ...record.index };
-  return null;
-}
-
-async function saveIndex(indexToSave) {
-  const res = await jsonbinFetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}`, {
+async function saveIndex() {
+  const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}`, {
     method: 'PUT',
     headers: jsonbinHeaders(),
-    body: JSON.stringify({ index: indexToSave }),
+    body: JSON.stringify({ index: _index }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => null);
@@ -255,7 +107,7 @@ async function saveIndex(indexToSave) {
 }
 
 // 동시 요청이 너무 많으면 요율 제한에 걸릴 수 있어 일정 개수씩 나눠 처리한다.
-async function runInBatches(items, worker, batchSize = 2) {
+async function runInBatches(items, worker, batchSize = 8) {
   const results = [];
   for (let i = 0; i < items.length; i += batchSize) {
     const batch = items.slice(i, i + batchSize);
@@ -268,72 +120,51 @@ async function runInBatches(items, worker, batchSize = 2) {
 async function loadIndex() {
   if (_index) return _index;
   if (_indexLoadPromise) return _indexLoadPromise;
-
   _indexLoadPromise = (async () => {
-    const res = await jsonbinFetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, {
-      headers: jsonbinHeaders(),
-      cache: 'no-store',
-    });
-    if (!res.ok) throw new Error(`인덱스 읽기 실패 (${res.status})`);
-    const data = await res.json();
-    const record = (data && data.record && typeof data.record === 'object') ? data.record : {};
-
-    if (record.index && typeof record.index === 'object') {
-      _index = { ...record.index };
-    } else if (record.kv && typeof record.kv === 'object') {
-      // 구버전(통짜 bin) 데이터 마이그레이션: 각 항목을 개별 bin으로 분리
-      const entries = Object.entries(record.kv);
-      const newIndex = {};
-      await runInBatches(entries, async ([k, v]) => {
-        const binId = await createBin(v);
-        newIndex[k] = binId;
-      });
-      await saveIndex(newIndex);
-      _index = newIndex;
-    } else {
-      // 정상적으로 읽었고 실제로 비어 있는 경우에만 빈 인덱스로 시작한다.
+    try {
+      const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, { headers: jsonbinHeaders() });
+      const data = await res.json();
+      const record = (data && data.record && typeof data.record === 'object') ? data.record : {};
+      if (record.index && typeof record.index === 'object') {
+        _index = record.index;
+      } else if (record.kv && typeof record.kv === 'object') {
+        // 구버전(통짜 bin) 데이터 마이그레이션: 각 항목을 개별 bin으로 분리
+        const entries = Object.entries(record.kv);
+        const newIndex = {};
+        await runInBatches(entries, async ([k, v]) => {
+          const binId = await createBin(v);
+          newIndex[k] = binId;
+        });
+        _index = newIndex;
+        await saveIndex();
+      } else {
+        _index = {};
+      }
+    } catch (e) {
+      window.alert('⚠️ 기존 데이터를 불러오거나 옮기는 중 오류가 발생했어요:\n\n' + (e && e.message ? e.message : e) + '\n\n이 내용을 캡처해서 알려주시면 원인을 확인할 수 있어요.');
       _index = {};
     }
     return _index;
   })();
-
-  try {
-    return await _indexLoadPromise;
-  } catch (e) {
-    // 핵심: 네트워크/서버 오류를 절대로 '빈 데이터'로 바꾸지 않는다.
-    _indexLoadPromise = null;
-    throw e;
-  }
+  return _indexLoadPromise;
 }
 
-// 인덱스 변경은 한 탭 안에서는 반드시 직렬화하고, 저장 뒤 다시 읽어서
-// 이번 변경이 실제 클라우드 인덱스에 남아 있는지 확인한다.
-// 다른 기기/탭이 거의 동시에 저장해 덮어쓴 경우 최신 인덱스 위에 다시 적용한다.
-function queueIndexMutation(mutator, verify) {
-  const job = _indexMutationQueue.then(async () => {
-    let lastError = null;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        const fresh = await fetchIndexFromCloud();
-        if (fresh === null) throw new Error('클라우드 인덱스 형식이 올바르지 않음');
-        mutator(fresh);
-        await saveIndex(fresh);
-
-        const confirmed = await fetchIndexFromCloud();
-        if (confirmed !== null && verify(confirmed)) {
-          _index = confirmed;
-          return confirmed;
-        }
-        lastError = new Error('동시 저장 충돌 감지');
-      } catch (e) {
-        lastError = e;
-      }
-      await new Promise(resolve => setTimeout(resolve, 120 * (attempt + 1)));
-    }
-    throw lastError || new Error('인덱스 저장 실패');
-  });
-  _indexMutationQueue = job.catch(() => {});
-  return job;
+// 인덱스에 항목을 더하거나 뺄 때는, 쓰기 직전에 클라우드의 '지금 이 순간' 최신 인덱스를
+// 다시 받아와 그 위에 이번 변경 하나만 얹어서 저장한다. 오래 열어둔 탭이 그사이 다른 기기가
+// 추가/삭제한 항목을 모른 채 인덱스를 통째로 덮어써서 사라지게 만드는 걸 막기 위함이다.
+async function withFreshIndex(mutate) {
+  let fresh;
+  try {
+    const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_INDEX_ID}/latest`, { headers: jsonbinHeaders() });
+    const data = await res.json();
+    const record = (data && data.record && typeof data.record === 'object') ? data.record : {};
+    fresh = (record.index && typeof record.index === 'object') ? { ...record.index } : {};
+  } catch (e) {
+    fresh = _index ? { ..._index } : {};
+  }
+  mutate(fresh);
+  _index = fresh;
+  await saveIndex();
 }
 
 window.storage = {
@@ -344,43 +175,25 @@ window.storage = {
     const value = await readBin(binId);
     return { key, value, shared: false };
   },
-
   async set(key, value) {
     const index = await loadIndex();
-    const existingBinId = index[key];
-
-    if (existingBinId) {
-      await updateBin(existingBinId, value);
+    if (index[key]) {
+      await updateBin(index[key], value);
     } else {
       const binId = await createBin(value);
-      try {
-        await queueIndexMutation(
-          idx => { idx[key] = binId; },
-          idx => idx[key] === binId
-        );
-      } catch (e) {
-        // 인덱스 연결에 실패한 고아 bin은 정리 시도. 실패해도 기존 데이터에는 영향 없음.
-        try { await jsonbinFetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
-        throw e;
-      }
+      await withFreshIndex(idx => { idx[key] = binId; });
     }
     return { key, value, shared: false };
   },
-
   async delete(key) {
     const index = await loadIndex();
     const binId = index[key];
-    if (!binId) return { key, deleted: true, shared: false };
-
-    // 먼저 인덱스에서 제거를 확정한 뒤 실제 bin을 삭제한다.
-    await queueIndexMutation(
-      idx => { delete idx[key]; },
-      idx => !Object.prototype.hasOwnProperty.call(idx, key)
-    );
-    try { await jsonbinFetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
+    if (binId) {
+      try { await fetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (e) { /* noop */ }
+      await withFreshIndex(idx => { delete idx[key]; });
+    }
     return { key, deleted: true, shared: false };
   },
-
   async list(prefix = '') {
     const index = await loadIndex();
     const keys = Object.keys(index).filter(k => k.indexOf(prefix) === 0);
@@ -412,7 +225,6 @@ const MapPin = makeIcon(<><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0
 const Film = makeIcon(<><rect x="2" y="2" width="20" height="20" rx="2" /><line x1="7" y1="2" x2="7" y2="22" /><line x1="17" y1="2" x2="17" y2="22" /><line x1="2" y1="12" x2="22" y2="12" /><line x1="2" y1="7" x2="7" y2="7" /><line x1="2" y1="17" x2="7" y2="17" /><line x1="17" y1="17" x2="22" y2="17" /><line x1="17" y1="7" x2="22" y2="7" /></>);
 const SettingsIcon = makeIcon(<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>);
 const Loader2 = makeIcon(<path d="M21 12a9 9 0 1 1-6.219-8.56" />);
-const RotateCcw = makeIcon(<><polyline points="1 4 1 10 7 10" /><path d="M3.5 15a9 9 0 1 0 .5-8.5L1 10" /></>);
 const PackageCheck = makeIcon(<><path d="M16 16l2 2 4-4" /><path d="M21 10V7a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 7v10a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0" /><path d="M3.29 7L12 12l8.71-5" /><line x1="12" y1="22" x2="12" y2="12" /></>);
 const Link2 = makeIcon(<><path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3" /><path d="M9 17H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3" /><line x1="8" y1="12" x2="16" y2="12" /></>);
 const PlusCircle = makeIcon(<><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" /></>);
@@ -607,15 +419,8 @@ function buildDisplayEntries(list, expandedSeries) {
         .sort((a, b) => (Number(a.seriesOrder) || 0) - (Number(b.seriesOrder) || 0));
       group.forEach(g => seen.add(g.id));
       if (expandedSeries.has(m.seriesId)) {
-        // 펼친 시리즈는 하나의 독립 블록으로 묶는다.
-        // 뒤의 일반 영화가 같은 줄에 끼어들지 않게 하기 위함이다.
-        entries.push({
-          type: 'series-expanded',
-          seriesId: m.seriesId,
-          seriesName: m.seriesName,
-          count: group.length,
-          movies: group,
-        });
+        entries.push({ type: 'series-header', seriesId: m.seriesId, seriesName: m.seriesName, count: group.length });
+        group.forEach(g => entries.push({ type: 'movie', movie: g }));
       } else {
         entries.push({ type: 'series-bundle', seriesId: m.seriesId, seriesName: m.seriesName, movies: group });
       }
@@ -747,7 +552,7 @@ function StarRating({ value, onChange, size = 15, readOnly = false }) {
   );
 }
 
-function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onCancel, onDelete, onAddCustomFormat, onAddSection, onAddCategory, onManageSection, saving }) {
+function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onCancel, onDelete, onAddCustomFormat, onAddSection, onAddCategory, onManageSection }) {
   const isEdit = !!initial;
   const [titleKr, setTitleKr] = useState(initial?.titleKr || '');
   const [titleOriginal, setTitleOriginal] = useState(initial?.titleOriginal || '');
@@ -1017,7 +822,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
             <span>보유 상태</span>
             <div className="segmented">
               <button type="button" className={status === 'owned' ? 'is-active' : ''} onClick={() => setStatus('owned')}>보유</button>
-              <button type="button" className={status === 'wishlist' ? 'is-active' : ''} onClick={() => setStatus('wishlist')}>미보유</button>
+              <button type="button" className={status === 'wishlist' ? 'is-active' : ''} onClick={() => setStatus('wishlist')}>위시리스트</button>
             </div>
           </div>
 
@@ -1185,7 +990,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
             confirmDelete ? (
               <div className="confirm-delete">
                 <span>정말 삭제할까요?</span>
-                <button type="button" className="btn btn--danger" onClick={() => onDelete(initial.id)} disabled={saving}>삭제</button>
+                <button type="button" className="btn btn--danger" onClick={() => onDelete(initial.id)}>삭제</button>
                 <button type="button" className="btn btn--ghost" onClick={() => setConfirmDelete(false)}>취소</button>
               </div>
             ) : (
@@ -1195,8 +1000,8 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
             )
           )}
           <div className="drawer__foot-actions">
-            <button type="button" className="btn btn--ghost" onClick={onCancel} disabled={saving}>취소</button>
-            <button type="button" className="btn btn--primary" onClick={handleSave} disabled={!titleKr.trim() || saving}>{saving ? <><Loader2 size={14} className="spin" /> 저장 중...</> : '저장'}</button>
+            <button type="button" className="btn btn--ghost" onClick={onCancel}>취소</button>
+            <button type="button" className="btn btn--primary" onClick={handleSave} disabled={!titleKr.trim()}>저장</button>
           </div>
         </div>
       </div>
@@ -1204,7 +1009,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   );
 }
 
-function BulkImportModal({ onCancel, onConfirm, saving }) {
+function BulkImportModal({ onCancel, onConfirm }) {
   const [text, setText] = useState('');
   const [parsed, setParsed] = useState(null);
 
@@ -1262,41 +1067,18 @@ function BulkImportModal({ onCancel, onConfirm, saving }) {
               )}
             </div>
           )}
-
-          <div className="field backup-section">
-            <span>자동 백업</span>
-            <p className="hint-text-small">저장에 성공할 때마다 현재 영화 목록과 설정을 별도 백업하고, 최근 10개를 유지해요. 복구해도 백업 자체는 삭제되지 않아요.</p>
-            <div className="backup-actions">
-              <button type="button" className="btn btn--ghost btn--sm" onClick={onRefreshBackups} disabled={backupBusy}>
-                {backupBusy ? <><Loader2 size={13} className="spin" /> 확인 중...</> : '백업 새로고침'}
-              </button>
-            </div>
-            <div className="backup-list">
-              {backups.length === 0 ? <div className="hint-text-small">아직 자동 백업이 없어요. 다음 저장부터 자동으로 만들어집니다.</div> : backups.map(b => (
-                <div className="backup-row" key={b.id}>
-                  <div>
-                    <div className="backup-row__date">{new Date(b.createdAt).toLocaleString('ko-KR')}</div>
-                    <div className="backup-row__meta">{b.count}편 · {b.reason || '저장'}</div>
-                  </div>
-                  <button type="button" className="btn btn--ghost btn--sm" onClick={() => onRestoreBackup(b)} disabled={backupBusy}>
-                    <RotateCcw size={13} /> 복구
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
         <div className="drawer__foot">
           <div />
           <div className="drawer__foot-actions">
-            <button type="button" className="btn btn--ghost" onClick={onCancel} disabled={saving}>취소</button>
+            <button type="button" className="btn btn--ghost" onClick={onCancel}>취소</button>
             <button
               type="button"
               className="btn btn--primary"
-              disabled={!parsed || parsed.ok.length === 0 || saving}
+              disabled={!parsed || parsed.ok.length === 0}
               onClick={() => onConfirm(parsed.ok)}
             >
-              {saving ? <><Loader2 size={14} className="spin" /> 저장 중...</> : (parsed ? `${parsed.ok.length}건 추가하기` : '추가하기')}
+              {parsed ? `${parsed.ok.length}건 추가하기` : '추가하기'}
             </button>
           </div>
         </div>
@@ -1305,7 +1087,7 @@ function BulkImportModal({ onCancel, onConfirm, saving }) {
   );
 }
 
-function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAddSection, onUpdateSection, onRemoveSection, onAddCategory, onUpdateCategory, onRemoveCategory, onResetSettings, backups, onRefreshBackups, onRestoreBackup, backupBusy }) {
+function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAddSection, onUpdateSection, onRemoveSection, onAddCategory, onUpdateCategory, onRemoveCategory, onResetSettings }) {
   const [activeSection, setActiveSection] = useState(initialSection || settings.sections[0]?.name || '');
   const [newSection, setNewSection] = useState('');
   const [newCatName, setNewCatName] = useState('');
@@ -1498,41 +1280,6 @@ function SeriesHeaderBar({ entry, onToggle }) {
 
 // 포스터만 촘촘히 진열한 '진열장' 뷰. 시리즈는 항상 이어서 배치되고,
 // 접혀있으면 묶음 타일 하나로, 펼쳐져 있으면 구분줄 + 개별 포스터로 보인다.
-function PosterMovieTile({ movie, onEdit }) {
-  const sColor = movie.seriesId ? seriesColor(movie.seriesId) : null;
-  return (
-    <button
-      type="button"
-      className="poster-tile"
-      onClick={() => onEdit(movie)}
-      title={movie.titleKr}
-    >
-      <div
-        className="poster-tile__frame"
-        style={sColor ? { borderTopColor: sColor, borderTopStyle: movie.seriesUnofficial ? 'dashed' : 'solid' } : undefined}
-      >
-        <Poster url={movie.posterUrl} size="gallery" />
-        {movie.status === 'wishlist' && <span className="poster-tile__wishlist-dot" title="미보유" />}
-        <div className="poster-tile__overlay">
-          <span className="poster-tile__title">{movie.titleKr}</span>
-          <StarRating value={movie.rating} readOnly size={10} />
-        </div>
-      </div>
-    </button>
-  );
-}
-
-function SeriesExpandedGalleryBlock({ entry, onEdit, onToggle }) {
-  return (
-    <div className="series-expanded-gallery-block">
-      <SeriesHeaderBar entry={entry} onToggle={onToggle} />
-      <div className="series-expanded-gallery-row">
-        {entry.movies.map(m => <PosterMovieTile key={m.id} movie={m} onEdit={onEdit} />)}
-      </div>
-    </div>
-  );
-}
-
 function PosterGallery({ entries, onEdit, onToggleSeries }) {
   return (
     <div className="poster-gallery">
@@ -1540,10 +1287,32 @@ function PosterGallery({ entries, onEdit, onToggleSeries }) {
         if (entry.type === 'series-bundle') {
           return <SeriesBundleTile key={entry.seriesId} entry={entry} onToggle={onToggleSeries} />;
         }
-        if (entry.type === 'series-expanded') {
-          return <SeriesExpandedGalleryBlock key={`expanded-${entry.seriesId}`} entry={entry} onEdit={onEdit} onToggle={onToggleSeries} />;
+        if (entry.type === 'series-header') {
+          return <SeriesHeaderBar key={`header-${entry.seriesId}`} entry={entry} onToggle={onToggleSeries} />;
         }
-        return <PosterMovieTile key={entry.movie.id} movie={entry.movie} onEdit={onEdit} />;
+        const m = entry.movie;
+        const sColor = m.seriesId ? seriesColor(m.seriesId) : null;
+        return (
+          <button
+            key={m.id}
+            type="button"
+            className="poster-tile"
+            onClick={() => onEdit(m)}
+            title={m.titleKr}
+          >
+            <div
+              className="poster-tile__frame"
+              style={sColor ? { borderTopColor: sColor, borderTopStyle: m.seriesUnofficial ? 'dashed' : 'solid' } : undefined}
+            >
+              <Poster url={m.posterUrl} size="gallery" />
+              {m.status === 'wishlist' && <span className="poster-tile__wishlist-dot" title="위시리스트" />}
+              <div className="poster-tile__overlay">
+                <span className="poster-tile__title">{m.titleKr}</span>
+                <StarRating value={m.rating} readOnly size={10} />
+              </div>
+            </div>
+          </button>
+        );
       })}
     </div>
   );
@@ -1565,26 +1334,6 @@ function SeriesBundleCard({ entry, onToggle }) {
       </div>
       <span className="series-bundle-card__chevron">▾</span>
     </button>
-  );
-}
-
-function SeriesExpandedCardBlock({ entry, onToggle, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
-  return (
-    <div className="series-expanded-card-block">
-      <SeriesHeaderBar entry={entry} onToggle={onToggle} />
-      <div className="series-expanded-card-grid">
-        {entry.movies.map(m => (
-          <MovieCard
-            key={m.id}
-            movie={m}
-            onEdit={onEdit}
-            onFilter={onFilter}
-            onMoveToOwned={onMoveToOwned}
-            onAddSequel={onAddSequel}
-          />
-        ))}
-      </div>
-    </div>
   );
 }
 
@@ -1687,7 +1436,7 @@ function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
 
         <div className="card__bottom">
           {movie.status === 'wishlist' && (
-            <span className="status-dot status-dot--wishlist">미보유</span>
+            <span className="status-dot status-dot--wishlist">위시리스트</span>
           )}
           {movie.formats?.map(f => <span key={f} className="format-tag">{f}</span>)}
           {movie.physicalLocation?.categoryName && (
@@ -1766,15 +1515,6 @@ const APP_CSS = `
         .btn--ghost:hover { border-color: var(--gold); }
         .btn--danger { background: var(--accent); color: var(--paper); }
         .btn--danger-text { color: var(--accent); border-color: var(--line-dark); }
-        .backup-section { border-top: 1px solid var(--line); padding-top: 16px; }
-        .backup-actions { display: flex; justify-content: flex-end; margin: 8px 0; }
-        .backup-list { display: flex; flex-direction: column; gap: 7px; max-height: 260px; overflow: auto; }
-        .backup-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 9px; padding: 9px 10px; background: color-mix(in srgb, var(--paper) 72%, transparent); }
-        .backup-row__date { font-size: 12.5px; font-weight: 600; color: var(--ink); }
-        .backup-row__meta { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
-        .save-status { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 10px; border-radius: 999px; font-size: 11.5px; color: var(--fg-soft); background: color-mix(in srgb, var(--fg) 6%, transparent); white-space: nowrap; }
-        .save-status.is-saving { color: var(--gold); background: color-mix(in srgb, var(--gold) 13%, transparent); }
-        .save-status__dot { width: 6px; height: 6px; border-radius: 50%; background: #6C8B5B; flex: 0 0 auto; }
         .icon-only-btn { background: transparent; border: 1px solid var(--line-dark); color: var(--fg); border-radius: 9px; padding: 8px; }
         .confirm-delete { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 
@@ -1789,7 +1529,7 @@ const APP_CSS = `
         .empty-state { text-align: center; padding: 80px 20px; color: var(--fg-soft); }
         .empty-state h3 { font-family: Georgia, "Apple SD Gothic Neo", serif; font-size: 20px; color: var(--fg); margin-bottom: 8px; }
 
-        .card { display: flex; gap: 12px; background: var(--paper); border-radius: 12px; padding: 12px; position: relative; }
+        .card { display: flex; gap: 12px; background: var(--paper); border-radius: 12px; padding: 12px; }
         .card__body { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
         .card__top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
         .card__title { display: flex; flex-direction: column; min-width: 0; }
@@ -1810,10 +1550,9 @@ const APP_CSS = `
         .more-info__toggle:hover { background: color-mix(in srgb, var(--gold) 34%, transparent); transform: scale(1.1); }
         .more-info__toggle.is-open { transform: rotate(180deg); }
         .more-info__toggle.is-open:hover { transform: rotate(180deg) scale(1.1); }
-        .more-info { position: relative; }
-        .more-info__body { position: absolute; top: 34px; left: 0; right: 0; z-index: 30; max-height: 230px; overflow-y: auto; font-size: 12.5px; color: var(--ink); line-height: 1.5; display: flex; flex-direction: column; gap: 10px; background: var(--paper-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; box-shadow: 0 10px 24px rgba(0,0,0,0.18); }
+        .more-info__body { font-size: 12.5px; color: var(--ink); line-height: 1.5; display: flex; flex-direction: column; gap: 10px; background: var(--paper-2); border-radius: 8px; padding: 10px 12px; margin-top: 2px; }
         .more-info__block { display: flex; flex-direction: column; gap: 3px; }
-        .more-info__block p { margin: 0; white-space: pre-wrap; }
+        .more-info__block p { margin: 0; }
         .more-info__block b { color: var(--ink-soft); font-weight: 700; font-size: 11px; }
 
         .card__bottom { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 2px; padding-top: 9px; border-top: 1px solid var(--line); }
@@ -1852,18 +1591,12 @@ const APP_CSS = `
         .series-header-bar__collapse { margin-left: auto; font-weight: 600; opacity: 0.85; }
         .series-header-bar:hover { background: color-mix(in srgb, var(--gold) 22%, transparent); }
 
-        .series-bundle-card { grid-column: 1 / -1; width: 100%; min-height: 108px; max-height: 108px; display: flex; align-items: center; gap: 14px; padding: 12px 16px; text-align: left; cursor: pointer; border: 1px solid color-mix(in srgb, var(--gold) 55%, var(--line)); background: color-mix(in srgb, var(--paper) 92%, var(--gold)); }
+        .series-bundle-card { display: flex; align-items: center; gap: 12px; padding: 12px; text-align: left; cursor: pointer; }
         .series-bundle-card__poster-wrap { position: relative; flex-shrink: 0; }
         .series-bundle-card__count { position: absolute; bottom: 5px; left: 5px; background: var(--gold); color: var(--bg); font-size: 10px; font-weight: 700; border-radius: 999px; padding: 2px 7px; }
         .series-bundle-card__info { flex: 1; min-width: 0; gap: 4px; }
         .series-bundle-card__years { font-size: 12px; color: var(--ink-soft); }
         .series-bundle-card__chevron { flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%; background: color-mix(in srgb, var(--gold) 16%, transparent); color: var(--gold); font-size: 16px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
-        .series-expanded-card-block { grid-column: 1 / -1; display: block; border: 1px solid color-mix(in srgb, var(--gold) 38%, transparent); border-radius: 12px; padding: 10px; background: color-mix(in srgb, var(--gold) 6%, transparent); }
-        .series-expanded-card-block > .series-header-bar { width: 100%; margin-bottom: 10px; }
-        .series-expanded-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
-        .series-expanded-gallery-block { flex: 1 0 100%; width: 100%; border: 1px solid color-mix(in srgb, var(--gold) 38%, transparent); border-radius: 10px; padding: 10px; background: color-mix(in srgb, var(--gold) 6%, transparent); }
-        .series-expanded-gallery-block > .series-header-bar { width: 100%; margin-bottom: 10px; }
-        .series-expanded-gallery-row { display: flex; flex-wrap: wrap; gap: 12px; }
 
         .poster-bundle-tile__count { position: absolute; bottom: 6px; left: 6px; background: var(--gold); color: var(--bg); font-size: 10.5px; font-weight: 700; border-radius: 999px; padding: 2px 8px; }
 
@@ -1938,14 +1671,6 @@ const APP_CSS = `
         .section-select-btn { flex: none; width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line); background: #fff; color: var(--accent); font-size: 12px; display: flex; align-items: center; justify-content: center; }
 `;
 
-function SaveStatus({ saving }) {
-  return (
-    <div className={`save-status${saving ? ' is-saving' : ''}`} aria-live="polite">
-      {saving ? <><Loader2 size={13} className="spin" /> 저장 중...</> : <><span className="save-status__dot" /> 저장됨</>}
-    </div>
-  );
-}
-
 function MovieCollectionApp() {
   const [loaded, setLoaded] = useState(false);
   const [movies, setMovies] = useState([]);
@@ -1968,63 +1693,18 @@ function MovieCollectionApp() {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState('');
-  const [savingCount, setSavingCount] = useState(0);
-  const [backups, setBackups] = useState([]);
-  const [backupBusy, setBackupBusy] = useState(false);
-  const saving = savingCount > 0;
-
-  function beginSaving() { setSavingCount(v => v + 1); }
-  function endSaving() { setSavingCount(v => Math.max(0, v - 1)); }
-
-  async function refreshBackups() {
-    setBackupBusy(true);
-    try { setBackups(await listAutomaticBackups()); }
-    catch (e) { console.error(e); window.alert('⚠️ 백업 목록을 불러오지 못했어요.'); }
-    finally { setBackupBusy(false); }
-  }
-
-  async function makeBackupAfterSave(nextMovies, reason, snapshot = {}) {
-    try {
-      const nextBackups = await createAutomaticBackup({ movies: nextMovies, customFormats: snapshot.customFormats ?? customFormats, settings: snapshot.settings ?? settings, reason });
-      setBackups(prev => [{ ...nextBackups }, ...prev.filter(b => b.id !== nextBackups.id)].slice(0, BACKUP_LIMIT));
-    } catch (e) {
-      console.error('자동 백업 실패', e);
-      // 원본 저장은 이미 성공했으므로 백업 실패 때문에 사용자의 저장을 되돌리지 않는다.
-      window.alert('⚠️ 영화 저장은 완료됐지만 자동 백업을 만들지 못했어요. 다음 저장 때 다시 시도합니다.');
-    }
-  }
-
-  async function handleRestoreBackup(backup) {
-    const ok = window.confirm(`${new Date(backup.createdAt).toLocaleString('ko-KR')} 시점의 ${backup.count}편 데이터를 복구할까요?\n\n현재 영화 목록은 백업 시점의 목록으로 교체됩니다.`);
-    if (!ok) return;
-    beginSaving();
-    try {
-      const restored = await restoreAutomaticBackup(backup);
-      setMovies(restored.sort((a, b) => String(b.addedAt || '').localeCompare(String(a.addedAt || ''))));
-      setCustomFormats(backup.customFormats || []);
-      setSettings(backup.settings || DEFAULT_SETTINGS);
-      await refreshBackups();
-      window.alert('백업 복구가 완료됐어요.');
-    } catch (e) {
-      console.error(e);
-      window.alert('⚠️ 백업을 복구하지 못했어요. 현재 데이터는 그대로일 수 있습니다.');
-    } finally { endSaving(); }
-  }
 
   useEffect(() => {
     (async () => {
       try {
         const listRes = await window.storage.list('movie:', false);
         const keys = listRes?.keys || [];
-        const values = [];
-        await runInBatches(keys, async k => {
+        const values = await Promise.all(keys.map(async k => {
           try {
             const r = await window.storage.get(k, false);
-            if (r?.value) values.push(JSON.parse(r.value));
-          } catch (e) {
-            console.warn('영화 불러오기 재시도 중:', k, e);
-          }
-        }, 1);
+            return r?.value ? JSON.parse(r.value) : null;
+          } catch (e) { return null; }
+        }));
         const loadedMovies = values.filter(Boolean);
         // VOD- 접두어가 붙은 옛 매체명 정리 + 단일 genre/country 문자열을 배열로 이전 (변경된 영화만 다시 저장)
         const migrated = await Promise.all(loadedMovies.map(async m => {
@@ -2060,36 +1740,17 @@ function MovieCollectionApp() {
       } catch (e) { setSettings(DEFAULT_SETTINGS); }
 
       setLoaded(true);
-      try { setBackups(await listAutomaticBackups()); } catch (e) { console.error('백업 목록 불러오기 실패', e); }
     })();
   }, []);
 
   async function persistCustomFormats(next) {
-    beginSaving();
-    try {
-      await window.storage.set('custom-formats', JSON.stringify(next), false);
-      setCustomFormats(next);
-      await makeBackupAfterSave(movies, '매체 목록 변경', { customFormats: next, settings });
-    } catch (e) {
-      console.error(e);
-      window.alert('⚠️ 매체 목록을 저장하지 못했어요. 기존 데이터는 변경하지 않았습니다.');
-    } finally {
-      endSaving();
-    }
+    setCustomFormats(next);
+    try { await window.storage.set('custom-formats', JSON.stringify(next), false); } catch (e) { console.error(e); }
   }
 
   async function persistSettings(next) {
-    beginSaving();
-    try {
-      await window.storage.set('settings', JSON.stringify(next), false);
-      setSettings(next);
-      await makeBackupAfterSave(movies, '설정 변경', { customFormats, settings: next });
-    } catch (e) {
-      console.error(e);
-      window.alert('⚠️ 설정을 저장하지 못했어요. 기존 설정은 변경하지 않았습니다.');
-    } finally {
-      endSaving();
-    }
+    setSettings(next);
+    try { await window.storage.set('settings', JSON.stringify(next), false); } catch (e) { console.error(e); }
   }
 
   function handleAddCustomFormat(value) {
@@ -2149,55 +1810,26 @@ function MovieCollectionApp() {
   }
 
   async function handleSaveMovie(movieData) {
-    beginSaving();
-    try {
-      await window.storage.set(`movie:${movieData.id}`, JSON.stringify(movieData), false);
-      const nextMovies = movies.some(m => m.id === movieData.id)
-        ? movies.map(m => m.id === movieData.id ? movieData : m)
-        : [movieData, ...movies];
-      setMovies(nextMovies);
-      await makeBackupAfterSave(nextMovies, movies.some(m => m.id === movieData.id) ? '영화 수정' : '영화 추가');
-      setFormOpen(false);
-      setEditingMovie(null);
-    } catch (e) {
-      console.error(e);
-      window.alert('⚠️ 영화를 저장하지 못했어요. 입력창은 그대로 두었습니다. 잠시 후 다시 저장해 주세요.');
-    } finally {
-      endSaving();
-    }
+    try { await window.storage.set(`movie:${movieData.id}`, JSON.stringify(movieData), false); } catch (e) { console.error(e); }
+    setMovies(prev => {
+      const exists = prev.some(m => m.id === movieData.id);
+      return exists ? prev.map(m => m.id === movieData.id ? movieData : m) : [movieData, ...prev];
+    });
+    setFormOpen(false);
+    setEditingMovie(null);
   }
 
   async function handleDeleteMovie(id) {
-    beginSaving();
-    try {
-      await window.storage.delete(`movie:${id}`, false);
-      const nextMovies = movies.filter(m => m.id !== id);
-      setMovies(nextMovies);
-      await makeBackupAfterSave(nextMovies, '영화 삭제');
-      setFormOpen(false);
-      setEditingMovie(null);
-    } catch (e) {
-      console.error(e);
-      window.alert('⚠️ 삭제를 완료하지 못했어요. 화면의 영화 정보는 그대로 유지했습니다.');
-    } finally {
-      endSaving();
-    }
+    try { await window.storage.delete(`movie:${id}`, false); } catch (e) { console.error(e); }
+    setMovies(prev => prev.filter(m => m.id !== id));
+    setFormOpen(false);
+    setEditingMovie(null);
   }
 
   async function handleMoveToOwned(movie) {
     const updated = { ...movie, status: 'owned' };
-    beginSaving();
-    try {
-      await window.storage.set(`movie:${updated.id}`, JSON.stringify(updated), false);
-      const nextMovies = movies.map(m => m.id === updated.id ? updated : m);
-      setMovies(nextMovies);
-      await makeBackupAfterSave(nextMovies, '보유 상태 변경');
-    } catch (e) {
-      console.error(e);
-      window.alert('⚠️ 보유 상태 변경을 저장하지 못했어요.');
-    } finally {
-      endSaving();
-    }
+    try { await window.storage.set(`movie:${updated.id}`, JSON.stringify(updated), false); } catch (e) { console.error(e); }
+    setMovies(prev => prev.map(m => m.id === updated.id ? updated : m));
   }
 
   function handleAddSequel(baseMovie) {
@@ -2209,31 +1841,11 @@ function MovieCollectionApp() {
   }
 
   async function handleBulkConfirm(newOnes) {
-    beginSaving();
-    const saved = [];
-    try {
-      for (const m of newOnes) {
-        try {
-          await window.storage.set(`movie:${m.id}`, JSON.stringify(m), false);
-          saved.push(m);
-        } catch (e) {
-          console.error(e);
-          break;
-        }
-      }
-      if (saved.length) {
-        const nextMovies = [...saved, ...movies];
-        setMovies(nextMovies);
-        await makeBackupAfterSave(nextMovies, '목록 일괄 등록');
-      }
-      if (saved.length === newOnes.length) {
-        setBulkOpen(false);
-      } else {
-        window.alert(`⚠️ ${newOnes.length}편 중 ${saved.length}편만 저장됐어요. 저장되지 않은 항목은 다시 시도해 주세요.`);
-      }
-    } finally {
-      endSaving();
+    for (const m of newOnes) {
+      try { await window.storage.set(`movie:${m.id}`, JSON.stringify(m), false); } catch (e) { console.error(e); }
     }
+    setMovies(prev => [...newOnes, ...prev]);
+    setBulkOpen(false);
   }
 
   function openFilter(type, value, label) {
@@ -2241,22 +1853,39 @@ function MovieCollectionApp() {
     setSearch('');
   }
 
+  const UNCLASSIFIED_FORMAT = '미분류';
+
   const allFormatOptions = useMemo(() => {
-    const extra = customFormats.filter(f => !DEFAULT_FORMATS.includes(f));
-    return [...DEFAULT_FORMATS, ...extra];
+    const extra = customFormats.filter(f => !DEFAULT_FORMATS.includes(f) && f !== UNCLASSIFIED_FORMAT);
+    return [...DEFAULT_FORMATS, ...extra, UNCLASSIFIED_FORMAT];
   }, [customFormats]);
 
   const formatCounts = useMemo(() => {
     const counts = {};
     for (const f of allFormatOptions) counts[f] = 0;
-    for (const m of movies) for (const f of m.formats || []) counts[f] = (counts[f] || 0) + 1;
+    for (const m of movies) {
+      const formats = Array.isArray(m.formats) ? m.formats : [];
+      if (formats.length === 0) {
+        counts[UNCLASSIFIED_FORMAT] = (counts[UNCLASSIFIED_FORMAT] || 0) + 1;
+      } else {
+        for (const f of formats) counts[f] = (counts[f] || 0) + 1;
+      }
+    }
     return counts;
   }, [movies, allFormatOptions]);
 
   const filteredMovies = useMemo(() => {
     let list = movies.filter(m => {
       if (statusFilter !== 'all' && m.status !== statusFilter) return false;
-      if (formatFilter.length > 0 && !(m.formats || []).some(f => formatFilter.includes(f))) return false;
+      if (formatFilter.length > 0) {
+        const formats = Array.isArray(m.formats) ? m.formats : [];
+        const matchesFormat = formatFilter.some(f =>
+          f === UNCLASSIFIED_FORMAT
+            ? formats.length === 0
+            : formats.includes(f)
+        );
+        if (!matchesFormat) return false;
+      }
       if (activeFilter) {
         const { type, value } = activeFilter;
         if (type === 'person') { if (!(m.director === value || (m.actors || []).includes(value))) return false; }
@@ -2330,7 +1959,7 @@ function MovieCollectionApp() {
         <div className="sidebar-top">
           <div>
             <h1 className="brand-title">영화 컬렉션</h1>
-            <div className="brand-stats">보유 {ownedCount}편 · 미보유 {wishlistCount}편</div>
+            <div className="brand-stats">보유 {ownedCount}편 · 위시리스트 {wishlistCount}편</div>
           </div>
           <button type="button" className="icon-only-btn" onClick={() => setSettingsOpen(true)} title="설정">
             <SettingsIcon size={16} />
@@ -2342,7 +1971,7 @@ function MovieCollectionApp() {
           <div className="segmented">
             <button type="button" className={statusFilter === 'all' ? 'is-active' : ''} onClick={() => setStatusFilter('all')}>전체</button>
             <button type="button" className={statusFilter === 'owned' ? 'is-active' : ''} onClick={() => setStatusFilter('owned')}>보유</button>
-            <button type="button" className={statusFilter === 'wishlist' ? 'is-active' : ''} onClick={() => setStatusFilter('wishlist')}>미보유</button>
+            <button type="button" className={statusFilter === 'wishlist' ? 'is-active' : ''} onClick={() => setStatusFilter('wishlist')}>위시리스트</button>
           </div>
         </div>
         <hr />
@@ -2368,7 +1997,6 @@ function MovieCollectionApp() {
             <Search size={16} />
             <input placeholder="제목, 감독, 배우, 태그로 검색" value={search} onChange={e => { setSearch(e.target.value); setActiveFilter(null); }} />
           </div>
-          <SaveStatus saving={saving} />
           <div className="segmented segmented--view">
             <button type="button" className={viewMode === 'card' ? 'is-active' : ''} onClick={() => setViewMode('card')}>카드형</button>
             <button type="button" className={viewMode === 'gallery' ? 'is-active' : ''} onClick={() => setViewMode('gallery')}>진열장</button>
@@ -2417,18 +2045,8 @@ function MovieCollectionApp() {
               if (entry.type === 'series-bundle') {
                 return <SeriesBundleCard key={entry.seriesId} entry={entry} onToggle={handleToggleSeries} />;
               }
-              if (entry.type === 'series-expanded') {
-                return (
-                  <SeriesExpandedCardBlock
-                    key={`expanded-${entry.seriesId}`}
-                    entry={entry}
-                    onToggle={handleToggleSeries}
-                    onEdit={mv => { setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }}
-                    onFilter={openFilter}
-                    onMoveToOwned={handleMoveToOwned}
-                    onAddSequel={handleAddSequel}
-                  />
-                );
+              if (entry.type === 'series-header') {
+                return <SeriesHeaderBar key={`header-${entry.seriesId}`} entry={entry} onToggle={handleToggleSeries} />;
               }
               const m = entry.movie;
               return <MovieCard key={m.id} movie={m} onEdit={mv => { setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }} onFilter={openFilter} onMoveToOwned={handleMoveToOwned} onAddSequel={handleAddSequel} />;
@@ -2465,11 +2083,10 @@ function MovieCollectionApp() {
           onAddSection={handleAddSection}
           onAddCategory={handleAddCategory}
           onManageSection={openSettingsForSection}
-          saving={saving}
         />
       )}
 
-      {bulkOpen && <BulkImportModal onCancel={() => setBulkOpen(false)} onConfirm={handleBulkConfirm} saving={saving} />}
+      {bulkOpen && <BulkImportModal onCancel={() => setBulkOpen(false)} onConfirm={handleBulkConfirm} />}
 
       {settingsOpen && (
         <SettingsModal
@@ -2484,10 +2101,6 @@ function MovieCollectionApp() {
           onUpdateCategory={handleUpdateCategory}
           onRemoveCategory={handleRemoveCategory}
           onResetSettings={handleResetSettings}
-          backups={backups}
-          onRefreshBackups={refreshBackups}
-          onRestoreBackup={handleRestoreBackup}
-          backupBusy={backupBusy}
         />
       )}
     </div>
