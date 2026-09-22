@@ -176,17 +176,40 @@ function jsonbinHeaders(extra) {
 // 일반적인 오류는 그대로 반환한다. 최대 5회, 점점 간격을 늘린다.
 async function jsonbinFetch(url, options = {}) {
   let lastResponse = null;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const res = await fetch(url, options);
-    if (res.status !== 429) return res;
-    lastResponse = res;
-    const retryAfter = Number(res.headers.get('Retry-After'));
-    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
-      ? Math.min(retryAfter * 1000, 8000)
-      : Math.min(1000 * Math.pow(2, attempt), 8000);
-    await new Promise(resolve => setTimeout(resolve, waitMs));
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 7; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      lastResponse = res;
+
+      // 정상 응답은 즉시 반환.
+      // 429 / 408 / 5xx만 일시 오류로 보고 재시도한다.
+      const transient =
+        res.status === 429 ||
+        res.status === 408 ||
+        (res.status >= 500 && res.status <= 599);
+
+      if (!transient) return res;
+
+      const retryAfter = Number(res.headers.get('Retry-After'));
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+        ? Math.min(retryAfter * 1000, 12000)
+        : Math.min(900 * Math.pow(1.7, attempt), 12000);
+
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+    } catch (e) {
+      lastError = e;
+
+      if (attempt >= 6) break;
+
+      const waitMs = Math.min(650 * Math.pow(1.65, attempt), 9000);
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+    }
   }
-  return lastResponse;
+
+  if (lastResponse) return lastResponse;
+  throw lastError || new Error('네트워크 요청 실패');
 }
 
 function reportSaveFailure(status, body) {
@@ -1961,7 +1984,7 @@ function MovieCollectionApp() {
   const [viewMode, setViewMode] = useState('card');
   const [expandedSeries, setExpandedSeries] = useState(() => new Set());
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(48);
+  const [pageSize, setPageSize] = useState(96);
 
   const [formOpen, setFormOpen] = useState(false);
   const [editingMovie, setEditingMovie] = useState(null);
@@ -2015,77 +2038,147 @@ function MovieCollectionApp() {
 
   useEffect(() => {
     (async () => {
+      setLoadError('');
+
       try {
         const listRes = await window.storage.list('movie:', false);
         const keys = listRes?.keys || [];
 
-        // 영화가 많아져도 모든 데이터를 읽을 때까지 빈 화면으로 기다리지 않는다.
-        // 첫 배치를 먼저 표시하고, 나머지는 백그라운드에서 계속 불러온다.
-        const LOAD_BATCH_SIZE = 24;
-        let allLoadedMovies = [];
-        let firstBatchShown = false;
+        const allLoadedMovies = [];
 
-        for (let i = 0; i < keys.length; i += LOAD_BATCH_SIZE) {
-          const batchKeys = keys.slice(i, i + LOAD_BATCH_SIZE);
-          const batchValues = [];
+        // 핵심:
+        // 영화 Bin을 동시에 여러 개 요청하지 않는다.
+        // Worker/JSONBin의 rate limit에 걸리지 않도록 한 편씩 읽고,
+        // 개별 영화가 실패하면 여러 번 재시도한다.
+        async function loadMovieWithRetry(key) {
+          let lastError = null;
 
-          await runInBatches(batchKeys, async k => {
+          for (let attempt = 0; attempt < 6; attempt++) {
             try {
-              const r = await window.storage.get(k, false);
-              if (r?.value) batchValues.push(JSON.parse(r.value));
+              const r = await window.storage.get(key, false);
+              if (!r?.value) throw new Error('영화 데이터가 비어 있습니다.');
+
+              return JSON.parse(r.value);
             } catch (e) {
-              console.warn('영화 불러오기 재시도 중:', k, e);
+              lastError = e;
+
+              if (attempt < 5) {
+                await new Promise(resolve =>
+                  setTimeout(resolve, Math.min(450 + attempt * 500, 3000))
+                );
+              }
             }
-          }, 6);
+          }
 
-          // VOD- 접두어가 붙은 옛 매체명 정리 + 단일 genre/country 문자열을 배열로 이전
-          const migratedBatch = await Promise.all(batchValues.map(async m => {
-            const needsFormatFix = m.formats?.some(f => f.startsWith('VOD-'));
-            const needsGenreFix = !m.genres && m.genre;
-            const needsCountryFix = !m.countries && m.country;
-            if (!needsFormatFix && !needsGenreFix && !needsCountryFix) return m;
-            const fixed = {
-              ...m,
-              formats: needsFormatFix ? m.formats.map(stripVodPrefix) : m.formats,
-              genres: needsGenreFix ? [m.genre] : (m.genres || []),
-              countries: needsCountryFix ? [m.country] : (m.countries || []),
-            };
-            try { await window.storage.set(`movie:${fixed.id}`, JSON.stringify(fixed), false); } catch (e) { /* noop */ }
-            return fixed;
-          }));
+          throw lastError || new Error('영화 불러오기 실패');
+        }
 
-          allLoadedMovies = allLoadedMovies.concat(migratedBatch);
-          setMovies([...allLoadedMovies]);
+        const MAX_CONCURRENCY = 4;
+        let cursor = 0;
+        let failedKeys = [];
 
-          if (!firstBatchShown) {
-            firstBatchShown = true;
-            setLoaded(true);
+        const normalizeLoadedMovie = (movie) => {
+          const needsFormatFix = movie.formats?.some(f => f.startsWith('VOD-'));
+          const needsGenreFix = !movie.genres && movie.genre;
+          const needsCountryFix = !movie.countries && movie.country;
+
+          return {
+            ...movie,
+            formats: needsFormatFix
+              ? movie.formats.map(stripVodPrefix)
+              : (movie.formats || []),
+            genres: needsGenreFix
+              ? [movie.genre]
+              : (movie.genres || []),
+            countries: needsCountryFix
+              ? [movie.country]
+              : (movie.countries || []),
+          };
+        };
+
+        // 4개씩만 동시에 읽는다.
+        // 1개씩 읽는 것보다 훨씬 빠르면서 JSONBin rate-limit 폭주도 피한다.
+        async function worker() {
+          while (true) {
+            const index = cursor++;
+            if (index >= keys.length) return;
+
+            const key = keys[index];
+
+            try {
+              const movie = await loadMovieWithRetry(key);
+              if (movie) {
+                allLoadedMovies[index] = normalizeLoadedMovie(movie);
+              } else {
+                failedKeys.push(key);
+              }
+            } catch (e) {
+              console.error('영화 로드 실패:', key, e);
+              failedKeys.push(key);
+            }
+
+            // 다음 요청을 너무 촘촘하게 만들지 않는다.
+            await new Promise(resolve => setTimeout(resolve, 120));
           }
         }
+
+        await Promise.all(
+          Array.from(
+            { length: Math.min(MAX_CONCURRENCY, keys.length) },
+            () => worker()
+          )
+        );
+
+        if (failedKeys.length > 0) {
+          console.error('일부 영화 로드 실패:', failedKeys);
+
+          // 실패 영화가 있는 상태에서는 부분 목록을 정상 데이터로 취급하지 않는다.
+          // 단, 이미 성공한 영화는 내부 상태에 넣지 않아 잘못된 저장도 방지한다.
+          setLoadError(
+            `전체 ${keys.length}편 중 ${failedKeys.length}편을 불러오지 못했습니다. ` +
+            `데이터는 삭제되지 않았습니다. 잠시 후 다시 불러와 주세요.`
+          );
+          return;
+        }
+
+        // 인덱스 순서를 보존하고, 모든 영화가 성공했을 때 한 번에 표시.
+        setMovies(allLoadedMovies.filter(Boolean));
       } catch (e) {
         console.error('클라우드 영화 목록 불러오기 실패:', e);
         setLoadError(
-          '클라우드에서 영화 목록을 불러오지 못했습니다. 데이터가 삭제된 것은 아닙니다. 잠시 후 다시 불러와 주세요.'
+          '영화 전체 목록을 불러오는 중 일부 요청이 실패했습니다. 데이터는 삭제되지 않았습니다. 다시 불러오기를 눌러 주세요.'
         );
       }
 
+      // 매체 목록은 읽기만 하고, 로딩 중 자동 수정 저장은 하지 않는다.
       try {
         const res2 = await window.storage.get('custom-formats', false);
         const raw = res2?.value ? JSON.parse(res2.value) : [];
-        const fixed = raw.map(stripVodPrefix);
-        setCustomFormats(fixed);
-        if (JSON.stringify(fixed) !== JSON.stringify(raw)) {
-          try { await window.storage.set('custom-formats', JSON.stringify(fixed), false); } catch (e) { /* noop */ }
-        }
-      } catch (e) { setCustomFormats([]); }
+        setCustomFormats(raw.map(stripVodPrefix));
+      } catch (e) {
+        console.warn('매체 목록 불러오기 실패:', e);
+        setCustomFormats([]);
+      }
 
       try {
         const res3 = await window.storage.get('settings', false);
         setSettings(res3?.value ? migrateSettings(JSON.parse(res3.value)) : DEFAULT_SETTINGS);
-      } catch (e) { setSettings(DEFAULT_SETTINGS); }
+      } catch (e) {
+        console.warn('설정 불러오기 실패:', e);
+        setSettings(DEFAULT_SETTINGS);
+      }
 
       setLoaded(true);
-      try { setBackups(await listAutomaticBackups()); } catch (e) { console.error('백업 목록 불러오기 실패', e); }
+
+      // 백업 목록은 화면 로딩 이후에만 읽는다.
+      // 영화 로딩과 JSONBin 요청이 겹치지 않게 한다.
+      if (!loadError) {
+        try {
+          setBackups(await listAutomaticBackups());
+        } catch (e) {
+          console.error('백업 목록 불러오기 실패', e);
+        }
+      }
     })();
   }, []);
 
@@ -2174,6 +2267,10 @@ function MovieCollectionApp() {
   }
 
   async function handleSaveMovie(movieData) {
+    if (loadError) {
+      window.alert('⚠️ 영화 전체 목록을 정상적으로 불러온 뒤 저장해 주세요.');
+      return;
+    }
     beginSaving();
     try {
       await window.storage.set(`movie:${movieData.id}`, JSON.stringify(movieData), false);
@@ -2234,6 +2331,10 @@ function MovieCollectionApp() {
   }
 
   async function handleBulkConfirm(newOnes) {
+    if (loadError) {
+      window.alert('⚠️ 목록 전체를 정상적으로 불러온 뒤 일괄 등록해 주세요.');
+      return;
+    }
     beginSaving();
     const saved = [];
     try {
