@@ -1970,6 +1970,36 @@ function SaveStatus({ saving }) {
   );
 }
 
+// ---------------------------------------------------------------
+// 로컬 캐시 (체감 로딩 속도 개선용)
+// 클라우드가 항상 원본이고, 이건 그 사본을 브라우저에 잠깐 저장해두는
+// 것뿐이다. 다음에 페이지를 열 때 이 캐시로 화면을 먼저 채워서 즉시
+// 뭔가 보이게 하고, 그 사이 클라우드에서 최신 내용을 다시 받아와
+// 조용히 갱신한다. 캐시가 없거나 읽기를 실패해도 기존처럼 클라우드에서
+// 정상적으로 불러온다.
+// ---------------------------------------------------------------
+const LOCAL_CACHE_KEY = 'mc-cache-v1';
+
+function loadLocalCache() {
+  try {
+    const raw = localStorage.getItem(LOCAL_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.movies)) return null;
+    return parsed;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveLocalCache(data) {
+  try {
+    localStorage.setItem(LOCAL_CACHE_KEY, JSON.stringify(data));
+  } catch (e) {
+    // 저장 공간 부족 등은 조용히 무시한다 (캐시는 있으면 좋고 없어도 그만).
+  }
+}
+
 function MovieCollectionApp() {
   const [loaded, setLoaded] = useState(false);
   const [movies, setMovies] = useState([]);
@@ -2039,6 +2069,21 @@ function MovieCollectionApp() {
   useEffect(() => {
     (async () => {
       setLoadError('');
+
+      // 캐시가 있으면 클라우드 응답을 기다리지 않고 일단 이걸로 화면을 먼저 채운다.
+      // 아래에서 클라우드 최신 데이터를 받아오면 다시 한번 조용히 덮어써서 갱신한다.
+      const cached = loadLocalCache();
+      if (cached) {
+        setMovies(cached.movies || []);
+        setCustomFormats(cached.customFormats || []);
+        setSettings(cached.settings || DEFAULT_SETTINGS);
+        setLoaded(true);
+      }
+
+      let finalMovies = cached?.movies || null;
+      let finalCustomFormats = cached?.customFormats || null;
+      let finalSettings = cached?.settings || null;
+      let moviesLoadedOk = false;
 
       try {
         const listRes = await window.storage.list('movie:', false);
@@ -2142,7 +2187,9 @@ function MovieCollectionApp() {
         }
 
         // 인덱스 순서를 보존하고, 모든 영화가 성공했을 때 한 번에 표시.
-        setMovies(allLoadedMovies.filter(Boolean));
+        finalMovies = allLoadedMovies.filter(Boolean);
+        setMovies(finalMovies);
+        moviesLoadedOk = true;
       } catch (e) {
         console.error('클라우드 영화 목록 불러오기 실패:', e);
         setLoadError(
@@ -2154,21 +2201,32 @@ function MovieCollectionApp() {
       try {
         const res2 = await window.storage.get('custom-formats', false);
         const raw = res2?.value ? JSON.parse(res2.value) : [];
-        setCustomFormats(raw.map(stripVodPrefix));
+        finalCustomFormats = raw.map(stripVodPrefix);
+        setCustomFormats(finalCustomFormats);
       } catch (e) {
         console.warn('매체 목록 불러오기 실패:', e);
-        setCustomFormats([]);
+        if (!cached) { finalCustomFormats = []; setCustomFormats([]); }
       }
 
       try {
         const res3 = await window.storage.get('settings', false);
-        setSettings(res3?.value ? migrateSettings(JSON.parse(res3.value)) : DEFAULT_SETTINGS);
+        finalSettings = res3?.value ? migrateSettings(JSON.parse(res3.value)) : DEFAULT_SETTINGS;
+        setSettings(finalSettings);
       } catch (e) {
         console.warn('설정 불러오기 실패:', e);
-        setSettings(DEFAULT_SETTINGS);
+        if (!cached) { finalSettings = DEFAULT_SETTINGS; setSettings(DEFAULT_SETTINGS); }
       }
 
       setLoaded(true);
+
+      // 영화 목록까지 온전히 새로 받아왔을 때만 캐시를 갱신한다 (부분 실패한 상태를 캐시로 남기지 않기 위함).
+      if (moviesLoadedOk) {
+        saveLocalCache({
+          movies: finalMovies || [],
+          customFormats: finalCustomFormats || [],
+          settings: finalSettings || DEFAULT_SETTINGS,
+        });
+      }
 
       // 백업 목록은 화면 로딩 이후에만 읽는다.
       // 영화 로딩과 JSONBin 요청이 겹치지 않게 한다.
@@ -2187,7 +2245,8 @@ function MovieCollectionApp() {
     try {
       await window.storage.set('custom-formats', JSON.stringify(next), false);
       setCustomFormats(next);
-      await makeBackupAfterSave(movies, '매체 목록 변경', { customFormats: next, settings });
+      saveLocalCache({ movies, customFormats: next, settings });
+      makeBackupAfterSave(movies, '매체 목록 변경', { customFormats: next, settings });
     } catch (e) {
       console.error(e);
       window.alert('⚠️ 매체 목록을 저장하지 못했어요. 기존 데이터는 변경하지 않았습니다.');
@@ -2201,7 +2260,8 @@ function MovieCollectionApp() {
     try {
       await window.storage.set('settings', JSON.stringify(next), false);
       setSettings(next);
-      await makeBackupAfterSave(movies, '설정 변경', { customFormats, settings: next });
+      saveLocalCache({ movies, customFormats, settings: next });
+      makeBackupAfterSave(movies, '설정 변경', { customFormats, settings: next });
     } catch (e) {
       console.error(e);
       window.alert('⚠️ 설정을 저장하지 못했어요. 기존 설정은 변경하지 않았습니다.');
@@ -2278,9 +2338,11 @@ function MovieCollectionApp() {
         ? movies.map(m => m.id === movieData.id ? movieData : m)
         : [movieData, ...movies];
       setMovies(nextMovies);
-      await makeBackupAfterSave(nextMovies, movies.some(m => m.id === movieData.id) ? '영화 수정' : '영화 추가');
       setFormOpen(false);
       setEditingMovie(null);
+      saveLocalCache({ movies: nextMovies, customFormats, settings });
+      // 백업은 완료를 기다리지 않고 배경에서 진행한다 (저장 체감 속도 개선).
+      makeBackupAfterSave(nextMovies, movies.some(m => m.id === movieData.id) ? '영화 수정' : '영화 추가');
     } catch (e) {
       console.error(e);
       window.alert('⚠️ 영화를 저장하지 못했어요. 입력창은 그대로 두었습니다. 잠시 후 다시 저장해 주세요.');
@@ -2295,9 +2357,10 @@ function MovieCollectionApp() {
       await window.storage.delete(`movie:${id}`, false);
       const nextMovies = movies.filter(m => m.id !== id);
       setMovies(nextMovies);
-      await makeBackupAfterSave(nextMovies, '영화 삭제');
       setFormOpen(false);
       setEditingMovie(null);
+      saveLocalCache({ movies: nextMovies, customFormats, settings });
+      makeBackupAfterSave(nextMovies, '영화 삭제');
     } catch (e) {
       console.error(e);
       window.alert('⚠️ 삭제를 완료하지 못했어요. 화면의 영화 정보는 그대로 유지했습니다.');
@@ -2313,7 +2376,8 @@ function MovieCollectionApp() {
       await window.storage.set(`movie:${updated.id}`, JSON.stringify(updated), false);
       const nextMovies = movies.map(m => m.id === updated.id ? updated : m);
       setMovies(nextMovies);
-      await makeBackupAfterSave(nextMovies, '보유 상태 변경');
+      saveLocalCache({ movies: nextMovies, customFormats, settings });
+      makeBackupAfterSave(nextMovies, '보유 상태 변경');
     } catch (e) {
       console.error(e);
       window.alert('⚠️ 보유 상태 변경을 저장하지 못했어요.');
@@ -2350,7 +2414,8 @@ function MovieCollectionApp() {
       if (saved.length) {
         const nextMovies = [...saved, ...movies];
         setMovies(nextMovies);
-        await makeBackupAfterSave(nextMovies, '목록 일괄 등록');
+        saveLocalCache({ movies: nextMovies, customFormats, settings });
+        makeBackupAfterSave(nextMovies, '목록 일괄 등록');
       }
       if (saved.length === newOnes.length) {
         setBulkOpen(false);
