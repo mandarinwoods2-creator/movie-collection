@@ -359,57 +359,159 @@ function queueIndexMutation(mutator, verify) {
   return job;
 }
 
+// ---------------------------------------------------------------
+// Supabase 기반 storage (새 원본)
+// JSONBin은 "평생 10,000회"라는 요청 한도 때문에 컬렉션이 커지면
+// 근본적으로 한계에 부딪힌다. Supabase는 진짜 데이터베이스라
+// 정상적인(재충전되는) 무료 요금제를 쓰고, 무엇보다 영화 전체를
+// 한 번의 요청으로 통째로 불러올 수 있어 로딩이 훨씬 빠르다.
+//
+// 주의: 아래 anon 키도 페이지 소스에 그대로 노출돼요.
+// 개인 컬렉션처럼 민감하지 않은 용도로만 쓰시고,
+// 이 URL을 공개적으로 퍼뜨리지 않는 걸 권장해요.
+// ---------------------------------------------------------------
+const SUPABASE_URL = 'https://eswxnvwrxragcodmbbxc.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVzd3hudndyeHJhZ2NvZG1iYnhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA0MTYzODcsImV4cCI6MjEwNTk5MjM4N30.zt2Alz_ggUKcLEFv4BszyJgS88RT2qLrLIYIRMBBeGI';
+const SUPABASE_REST = `${SUPABASE_URL}/rest/v1/kv_store`;
+
+function supabaseHeaders(extra) {
+  return {
+    'apikey': SUPABASE_ANON_KEY,
+    'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+    'Content-Type': 'application/json',
+    ...(extra || {}),
+  };
+}
+
+function reportSupabaseFailure(status, body) {
+  let msg = `클라우드 저장 실패 (${status})`;
+  if (body && body.message) msg += `: ${body.message}`;
+  window.alert('⚠️ ' + msg + '\n방금 한 변경사항이 다른 기기에는 반영되지 않았을 수 있어요.');
+}
+
+async function supabaseGetOne(key) {
+  const res = await fetch(`${SUPABASE_REST}?key=eq.${encodeURIComponent(key)}&select=value`, {
+    headers: supabaseHeaders(),
+  });
+  if (!res.ok) throw new Error(`Supabase 읽기 실패 (${res.status})`);
+  const rows = await res.json();
+  if (!rows.length) throw new Error('not found');
+  return rows[0].value;
+}
+
+async function supabaseSetOne(key, value) {
+  const res = await fetch(SUPABASE_REST, {
+    method: 'POST',
+    headers: supabaseHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
+    body: JSON.stringify({ key, value, updated_at: new Date().toISOString() }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    reportSupabaseFailure(res.status, body);
+    throw new Error('Supabase 저장 실패');
+  }
+}
+
+async function supabaseDeleteOne(key) {
+  const res = await fetch(`${SUPABASE_REST}?key=eq.${encodeURIComponent(key)}`, {
+    method: 'DELETE',
+    headers: supabaseHeaders(),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    reportSupabaseFailure(res.status, body);
+    throw new Error('Supabase 삭제 실패');
+  }
+}
+
+async function supabaseListKeys(prefix) {
+  const pattern = encodeURIComponent(`${prefix}*`);
+  const res = await fetch(`${SUPABASE_REST}?key=like.${pattern}&select=key`, {
+    headers: supabaseHeaders(),
+  });
+  if (!res.ok) throw new Error(`Supabase 목록 조회 실패 (${res.status})`);
+  const rows = await res.json();
+  return rows.map(r => r.key);
+}
+
+// 목록 조회 후 하나씩 또 불러오는 대신, 한 번의 요청으로 prefix에 맞는
+// key/value를 통째로 받아온다. 영화 전체를 불러올 때 이걸로 요청 수를
+// 1건으로 줄인다 (로딩 속도의 핵심 개선 지점).
+async function supabaseGetAllByPrefix(prefix) {
+  const pattern = encodeURIComponent(`${prefix}*`);
+  const res = await fetch(`${SUPABASE_REST}?key=like.${pattern}&select=key,value`, {
+    headers: supabaseHeaders(),
+  });
+  if (!res.ok) throw new Error(`Supabase 일괄 조회 실패 (${res.status})`);
+  return await res.json(); // [{key, value}, ...]
+}
+
 window.storage = {
   async get(key) {
-    const index = await loadIndex();
-    const binId = index[key];
-    if (!binId) throw new Error('not found');
-    const value = await readBin(binId);
+    const value = await supabaseGetOne(key);
     return { key, value, shared: false };
   },
-
   async set(key, value) {
-    const index = await loadIndex();
-    const existingBinId = index[key];
-
-    if (existingBinId) {
-      await updateBin(existingBinId, value);
-    } else {
-      const binId = await createBin(value);
-      try {
-        await queueIndexMutation(
-          idx => { idx[key] = binId; },
-          idx => idx[key] === binId
-        );
-      } catch (e) {
-        // 인덱스 연결에 실패한 고아 bin은 정리 시도. 실패해도 기존 데이터에는 영향 없음.
-        try { await jsonbinFetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
-        throw e;
-      }
-    }
+    await supabaseSetOne(key, value);
     return { key, value, shared: false };
   },
-
   async delete(key) {
-    const index = await loadIndex();
-    const binId = index[key];
-    if (!binId) return { key, deleted: true, shared: false };
-
-    // 먼저 인덱스에서 제거를 확정한 뒤 실제 bin을 삭제한다.
-    await queueIndexMutation(
-      idx => { delete idx[key]; },
-      idx => !Object.prototype.hasOwnProperty.call(idx, key)
-    );
-    try { await jsonbinFetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
+    await supabaseDeleteOne(key);
     return { key, deleted: true, shared: false };
   },
-
   async list(prefix = '') {
-    const index = await loadIndex();
-    const keys = Object.keys(index).filter(k => k.indexOf(prefix) === 0);
+    const keys = await supabaseListKeys(prefix);
     return { keys, prefix, shared: false };
   },
+  // 대량 조회 전용 확장 메서드 (표준 인터페이스는 아니지만, 로딩 속도를
+  // 위해 이 파일 안에서만 특별히 사용한다).
+  async getAllByPrefix(prefix) {
+    const rows = await supabaseGetAllByPrefix(prefix);
+    return { rows, shared: false };
+  },
 };
+
+// ---------------------------------------------------------------
+// JSONBin → Supabase 1회성 이전
+// 예전에 JSONBin에 저장해둔 데이터가 있으면, Supabase가 비어있을 때
+// 딱 한 번 그대로 옮겨온다. 이후로는 이 코드는 다시 실행되지 않는다.
+// ---------------------------------------------------------------
+async function migrateFromJsonbinIfNeeded() {
+  try {
+    const marker = await supabaseGetOne('__migrated_from_jsonbin__').catch(() => null);
+    if (marker) return; // 이미 이전 완료됨
+  } catch (e) { /* 마커 없음 = 아직 이전 안 됨, 계속 진행 */ }
+
+  let legacyIndex;
+  try {
+    legacyIndex = await loadIndex();
+  } catch (e) {
+    return; // 예전 데이터 자체를 못 읽으면 이전 없이 그냥 새로 시작
+  }
+  const legacyKeys = Object.keys(legacyIndex || {});
+  if (legacyKeys.length === 0) {
+    await supabaseSetOne('__migrated_from_jsonbin__', 'true').catch(() => {});
+    return;
+  }
+
+  window.dispatchEvent(new CustomEvent('mc-migration-progress', { detail: { total: legacyKeys.length, done: 0 } }));
+
+  let done = 0;
+  for (const key of legacyKeys) {
+    try {
+      const binId = legacyIndex[key];
+      const value = await readBin(binId);
+      await supabaseSetOne(key, value);
+    } catch (e) {
+      console.warn('이전 실패:', key, e);
+    }
+    done += 1;
+    window.dispatchEvent(new CustomEvent('mc-migration-progress', { detail: { total: legacyKeys.length, done } }));
+  }
+
+  await supabaseSetOne('__migrated_from_jsonbin__', 'true').catch(() => {});
+}
+
 
 // ---------------------------------------------------------------
 // 아이콘 (lucide-react 없이 쓰기 위한 간단한 대체 SVG 아이콘)
@@ -2086,114 +2188,36 @@ function MovieCollectionApp() {
       let moviesLoadedOk = false;
 
       try {
-        const listRes = await window.storage.list('movie:', false);
-        const keys = listRes?.keys || [];
+        await migrateFromJsonbinIfNeeded();
+      } catch (e) {
+        console.warn('JSONBin 이전 중 문제가 있었어요:', e);
+      }
 
-        const allLoadedMovies = [];
-
-        // 핵심:
-        // 영화 Bin을 동시에 여러 개 요청하지 않는다.
-        // Worker/JSONBin의 rate limit에 걸리지 않도록 한 편씩 읽고,
-        // 개별 영화가 실패하면 여러 번 재시도한다.
-        async function loadMovieWithRetry(key) {
-          let lastError = null;
-
-          for (let attempt = 0; attempt < 6; attempt++) {
-            try {
-              const r = await window.storage.get(key, false);
-              if (!r?.value) throw new Error('영화 데이터가 비어 있습니다.');
-
-              return JSON.parse(r.value);
-            } catch (e) {
-              lastError = e;
-
-              if (attempt < 5) {
-                await new Promise(resolve =>
-                  setTimeout(resolve, Math.min(450 + attempt * 500, 3000))
-                );
-              }
-            }
-          }
-
-          throw lastError || new Error('영화 불러오기 실패');
-        }
-
-        const MAX_CONCURRENCY = 4;
-        let cursor = 0;
-        let failedKeys = [];
-
-        const normalizeLoadedMovie = (movie) => {
-          const needsFormatFix = movie.formats?.some(f => f.startsWith('VOD-'));
-          const needsGenreFix = !movie.genres && movie.genre;
-          const needsCountryFix = !movie.countries && movie.country;
-
-          return {
-            ...movie,
-            formats: needsFormatFix
-              ? movie.formats.map(stripVodPrefix)
-              : (movie.formats || []),
-            genres: needsGenreFix
-              ? [movie.genre]
-              : (movie.genres || []),
-            countries: needsCountryFix
-              ? [movie.country]
-              : (movie.countries || []),
-          };
+      const normalizeLoadedMovie = (movie) => {
+        const needsFormatFix = movie.formats?.some(f => f.startsWith('VOD-'));
+        const needsGenreFix = !movie.genres && movie.genre;
+        const needsCountryFix = !movie.countries && movie.country;
+        return {
+          ...movie,
+          formats: needsFormatFix ? movie.formats.map(stripVodPrefix) : (movie.formats || []),
+          genres: needsGenreFix ? [movie.genre] : (movie.genres || []),
+          countries: needsCountryFix ? [movie.country] : (movie.countries || []),
         };
+      };
 
-        // 4개씩만 동시에 읽는다.
-        // 1개씩 읽는 것보다 훨씬 빠르면서 JSONBin rate-limit 폭주도 피한다.
-        async function worker() {
-          while (true) {
-            const index = cursor++;
-            if (index >= keys.length) return;
-
-            const key = keys[index];
-
-            try {
-              const movie = await loadMovieWithRetry(key);
-              if (movie) {
-                allLoadedMovies[index] = normalizeLoadedMovie(movie);
-              } else {
-                failedKeys.push(key);
-              }
-            } catch (e) {
-              console.error('영화 로드 실패:', key, e);
-              failedKeys.push(key);
-            }
-
-            // 다음 요청을 너무 촘촘하게 만들지 않는다.
-            await new Promise(resolve => setTimeout(resolve, 120));
-          }
-        }
-
-        await Promise.all(
-          Array.from(
-            { length: Math.min(MAX_CONCURRENCY, keys.length) },
-            () => worker()
-          )
-        );
-
-        if (failedKeys.length > 0) {
-          console.error('일부 영화 로드 실패:', failedKeys);
-
-          // 실패 영화가 있는 상태에서는 부분 목록을 정상 데이터로 취급하지 않는다.
-          // 단, 이미 성공한 영화는 내부 상태에 넣지 않아 잘못된 저장도 방지한다.
-          setLoadError(
-            `전체 ${keys.length}편 중 ${failedKeys.length}편을 불러오지 못했습니다. ` +
-            `데이터는 삭제되지 않았습니다. 잠시 후 다시 불러와 주세요.`
-          );
-          return;
-        }
-
-        // 인덱스 순서를 보존하고, 모든 영화가 성공했을 때 한 번에 표시.
-        finalMovies = allLoadedMovies.filter(Boolean);
+      try {
+        // 영화 한 편씩 따로 요청하지 않고, 한 번의 요청으로 전체를 통째로 받아온다.
+        const { rows } = await window.storage.getAllByPrefix('movie:');
+        finalMovies = rows
+          .map(r => { try { return JSON.parse(r.value); } catch (e) { return null; } })
+          .filter(Boolean)
+          .map(normalizeLoadedMovie);
         setMovies(finalMovies);
         moviesLoadedOk = true;
       } catch (e) {
         console.error('클라우드 영화 목록 불러오기 실패:', e);
         setLoadError(
-          '영화 전체 목록을 불러오는 중 일부 요청이 실패했습니다. 데이터는 삭제되지 않았습니다. 다시 불러오기를 눌러 주세요.'
+          '영화 전체 목록을 불러오지 못했습니다. 데이터는 삭제되지 않았습니다. 다시 불러오기를 눌러 주세요.'
         );
       }
 
