@@ -62,111 +62,6 @@ function makeBackupId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-async function createAutomaticBackup({ movies, customFormats, settings, reason = '저장' }) {
-  const job = _backupQueue.then(async () => {
-    const id = makeBackupId();
-    const createdAt = new Date().toISOString();
-
-    // 백업 1개를 1개의 bin으로 저장해 요청 수를 최소화한다.
-    // 영화가 많아져 100KB를 넘는 경우에는 기존의 영화별 백업 방식으로
-    // 자동 전환한다.
-    const snapshot = {
-      id,
-      createdAt,
-      reason,
-      count: movies.length,
-      customFormats: Array.isArray(customFormats) ? customFormats : [],
-      settings: settings || DEFAULT_SETTINGS,
-      movies,
-    };
-
-    let metaBinId;
-    try {
-      metaBinId = await createBin(snapshot, { report: false });
-    } catch (firstError) {
-      // 큰 컬렉션은 영화별 복사 방식으로 백업한다.
-      const movieBins = {};
-      await runInBatches(movies, async movie => {
-        movieBins[movie.id] = await createBin(JSON.stringify(movie));
-      }, 2);
-      metaBinId = await createBin({
-        id,
-        createdAt,
-        reason,
-        count: movies.length,
-        customFormats: Array.isArray(customFormats) ? customFormats : [],
-        settings: settings || DEFAULT_SETTINGS,
-        movieBins,
-      });
-    }
-
-    await queueIndexMutation(
-      idx => { idx[`${BACKUP_PREFIX}${id}`] = metaBinId; },
-      idx => idx[`${BACKUP_PREFIX}${id}`] === metaBinId
-    );
-
-    const index = await fetchIndexFromCloud();
-    const backupEntries = Object.entries(index || {})
-      .filter(([key]) => key.startsWith(BACKUP_PREFIX))
-      .sort((a, b) => a[0].slice(BACKUP_PREFIX.length).localeCompare(b[0].slice(BACKUP_PREFIX.length)));
-
-    const old = backupEntries.slice(0, Math.max(0, backupEntries.length - BACKUP_LIMIT));
-    for (const [key, metaId] of old) {
-      try {
-        const oldMeta = await readBin(metaId);
-        const oldMovieBins = oldMeta?.movieBins ? Object.values(oldMeta.movieBins) : [];
-        await queueIndexMutation(
-          idx => { delete idx[key]; },
-          idx => !Object.prototype.hasOwnProperty.call(idx, key)
-        );
-        try { await jsonbinFetch(`${JSONBIN_BASE}/${metaId}`, { method: 'DELETE', headers: jsonbinHeaders() }); } catch (_) {}
-        await Promise.all(oldMovieBins.map(binId => jsonbinFetch(`${JSONBIN_BASE}/${binId}`, { method: 'DELETE', headers: jsonbinHeaders() }).catch(() => null)));
-      } catch (_) {
-        // 오래된 백업 정리는 best-effort
-      }
-    }
-
-    return { id, createdAt, count: movies.length, reason };
-  });
-  _backupQueue = job.catch(() => {});
-  return job;
-}
-async function listAutomaticBackups() {
-  const index = await fetchIndexFromCloud();
-  const entries = Object.entries(index || {}).filter(([key]) => key.startsWith(BACKUP_PREFIX));
-  const result = [];
-  for (const [key, metaBinId] of entries) {
-    try {
-      const meta = await readBin(metaBinId);
-      if (meta?.id) result.push({ ...meta, metaBinId });
-    } catch (_) {}
-  }
-  return result.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, BACKUP_LIMIT);
-}
-
-async function restoreAutomaticBackup(backup) {
-  let restored = [];
-
-  if (Array.isArray(backup?.movies)) {
-    restored = backup.movies;
-  } else {
-    const movieBins = backup?.movieBins || {};
-    const ids = Object.keys(movieBins);
-    await runInBatches(ids, async id => {
-      const raw = await readBin(movieBins[id]);
-      const movie = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      if (movie?.id) restored.push(movie);
-    }, 2);
-  }
-
-  const currentIndex = await fetchIndexFromCloud();
-  const currentMovieKeys = Object.keys(currentIndex || {}).filter(k => k.startsWith('movie:'));
-  for (const key of currentMovieKeys) await window.storage.delete(key);
-  for (const movie of restored) await window.storage.set(`movie:${movie.id}`, JSON.stringify(movie));
-  await window.storage.set('custom-formats', JSON.stringify(backup.customFormats || []));
-  await window.storage.set('settings', JSON.stringify(backup.settings || DEFAULT_SETTINGS));
-  return restored;
-}
 function jsonbinHeaders(extra) {
   return { 'Content-Type': 'application/json', ...(extra || {}) };
 }
@@ -424,26 +319,84 @@ async function supabaseDeleteOne(key) {
   }
 }
 
+// Supabase(PostgREST)는 한 번에 최대 1000행까지만 돌려준다. 컬렉션이 커져도
+// 잘리지 않도록 페이지 단위로 끝까지 읽는다. 첫 요청에서 전체 개수를 알 수
+// 있으면 나머지 페이지는 동시에 받아와서 더 빠르게 끝낸다.
+const SUPABASE_PAGE_SIZE = 1000;
+
+async function supabaseSelectAll(filterQuery, select) {
+  const url = offset =>
+    `${SUPABASE_REST}?${filterQuery}&select=${select}&order=key.asc&limit=${SUPABASE_PAGE_SIZE}&offset=${offset}`;
+
+  const first = await fetch(url(0), { headers: supabaseHeaders({ 'Prefer': 'count=exact' }) });
+  if (!first.ok) throw new Error(`Supabase 조회 실패 (${first.status})`);
+  const firstRows = await first.json();
+  if (firstRows.length < SUPABASE_PAGE_SIZE) return firstRows;
+
+  let total = NaN;
+  const range = first.headers.get('content-range'); // 예: 0-999/2345
+  if (range && range.includes('/')) total = parseInt(range.split('/')[1], 10);
+
+  const all = [...firstRows];
+  if (Number.isFinite(total) && total > SUPABASE_PAGE_SIZE) {
+    const offsets = [];
+    for (let o = SUPABASE_PAGE_SIZE; o < total; o += SUPABASE_PAGE_SIZE) offsets.push(o);
+    const pages = await Promise.all(offsets.map(async o => {
+      const res = await fetch(url(o), { headers: supabaseHeaders() });
+      if (!res.ok) throw new Error(`Supabase 조회 실패 (${res.status})`);
+      return res.json();
+    }));
+    pages.forEach(rows => all.push(...rows));
+    return all;
+  }
+
+  // 전체 개수를 알 수 없으면 한 페이지씩 이어서 읽는다.
+  let offset = SUPABASE_PAGE_SIZE;
+  while (true) {
+    const res = await fetch(url(offset), { headers: supabaseHeaders() });
+    if (!res.ok) throw new Error(`Supabase 조회 실패 (${res.status})`);
+    const rows = await res.json();
+    all.push(...rows);
+    if (rows.length < SUPABASE_PAGE_SIZE) break;
+    offset += SUPABASE_PAGE_SIZE;
+  }
+  return all;
+}
+
 async function supabaseListKeys(prefix) {
-  const pattern = encodeURIComponent(`${prefix}*`);
-  const res = await fetch(`${SUPABASE_REST}?key=like.${pattern}&select=key`, {
-    headers: supabaseHeaders(),
-  });
-  if (!res.ok) throw new Error(`Supabase 목록 조회 실패 (${res.status})`);
-  const rows = await res.json();
+  const rows = await supabaseSelectAll(`key=like.${encodeURIComponent(`${prefix}*`)}`, 'key');
   return rows.map(r => r.key);
 }
 
-// 목록 조회 후 하나씩 또 불러오는 대신, 한 번의 요청으로 prefix에 맞는
-// key/value를 통째로 받아온다. 영화 전체를 불러올 때 이걸로 요청 수를
-// 1건으로 줄인다 (로딩 속도의 핵심 개선 지점).
+// 목록 조회 후 하나씩 또 불러오는 대신, 한 번에 prefix에 맞는 key/value를 통째로 받아온다.
+// 영화 전체를 불러올 때 요청 수를 극적으로 줄이는 핵심 지점이다.
 async function supabaseGetAllByPrefix(prefix) {
-  const pattern = encodeURIComponent(`${prefix}*`);
-  const res = await fetch(`${SUPABASE_REST}?key=like.${pattern}&select=key,value`, {
+  return supabaseSelectAll(`key=like.${encodeURIComponent(`${prefix}*`)}`, 'key,value');
+}
+
+// 여러 행을 한 번에 저장(upsert)한다. 너무 커지지 않도록 나눠서 보낸다.
+async function supabaseSetMany(rows, chunkSize = 100) {
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize).map(r => ({ key: r.key, value: r.value, updated_at: new Date().toISOString() }));
+    const res = await fetch(SUPABASE_REST, {
+      method: 'POST',
+      headers: supabaseHeaders({ 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
+      body: JSON.stringify(chunk),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      reportSupabaseFailure(res.status, body);
+      throw new Error('Supabase 일괄 저장 실패');
+    }
+  }
+}
+
+async function supabaseDeleteByPrefix(prefix) {
+  const res = await fetch(`${SUPABASE_REST}?key=like.${encodeURIComponent(`${prefix}*`)}`, {
+    method: 'DELETE',
     headers: supabaseHeaders(),
   });
-  if (!res.ok) throw new Error(`Supabase 일괄 조회 실패 (${res.status})`);
-  return await res.json(); // [{key, value}, ...]
+  if (!res.ok) throw new Error(`Supabase 삭제 실패 (${res.status})`);
 }
 
 window.storage = {
@@ -473,45 +426,161 @@ window.storage = {
 
 // ---------------------------------------------------------------
 // JSONBin → Supabase 1회성 이전
-// 예전에 JSONBin에 저장해둔 데이터가 있으면, Supabase가 비어있을 때
-// 딱 한 번 그대로 옮겨온다. 이후로는 이 코드는 다시 실행되지 않는다.
+// 예전에 JSONBin에 저장해둔 데이터를 Supabase로 옮긴다. 이전이 끝나면
+// 표시(마커)를 남겨서 이후에는 JSONBin을 다시 건드리지 않는다.
+// 이미 옮겨진 항목은 건너뛰므로 중간에 끊겨도 이어서 진행되고,
+// JSONBin의 남은 요청 수도 최소한으로만 쓴다.
 // ---------------------------------------------------------------
-async function migrateFromJsonbinIfNeeded() {
-  try {
-    const marker = await supabaseGetOne('__migrated_from_jsonbin__').catch(() => null);
-    if (marker) return; // 이미 이전 완료됨
-  } catch (e) { /* 마커 없음 = 아직 이전 안 됨, 계속 진행 */ }
+const MIGRATION_MARKER_KEY = '__migrated_from_jsonbin__';
+const MIGRATION_LOCAL_FLAG = 'mc-migrated-v1';
 
-  let legacyIndex;
-  try {
-    legacyIndex = await loadIndex();
-  } catch (e) {
-    return; // 예전 데이터 자체를 못 읽으면 이전 없이 그냥 새로 시작
-  }
-  const legacyKeys = Object.keys(legacyIndex || {});
-  if (legacyKeys.length === 0) {
-    await supabaseSetOne('__migrated_from_jsonbin__', 'true').catch(() => {});
+function shouldMigrateKey(key) {
+  return key.startsWith('movie:') || key === 'settings' || key === 'custom-formats';
+}
+
+async function migrateFromJsonbinIfNeeded() {
+  try { if (localStorage.getItem(MIGRATION_LOCAL_FLAG) === '1') return; } catch (e) {}
+
+  const marker = await supabaseGetOne(MIGRATION_MARKER_KEY).catch(() => null);
+  if (marker) {
+    try { localStorage.setItem(MIGRATION_LOCAL_FLAG, '1'); } catch (e) {}
     return;
   }
 
-  window.dispatchEvent(new CustomEvent('mc-migration-progress', { detail: { total: legacyKeys.length, done: 0 } }));
+  const legacyIndex = await loadIndex(); // 실패하면 예외 → 이전 없이 넘어가고 다음 로딩 때 다시 시도
+  const legacyKeys = Object.keys(legacyIndex || {}).filter(shouldMigrateKey);
 
-  let done = 0;
-  for (const key of legacyKeys) {
-    try {
-      const binId = legacyIndex[key];
-      const value = await readBin(binId);
-      await supabaseSetOne(key, value);
-    } catch (e) {
-      console.warn('이전 실패:', key, e);
+  if (legacyKeys.length > 0) {
+    const existing = new Set(await supabaseListKeys(''));
+    const todo = legacyKeys.filter(k => !existing.has(k));
+    const total = legacyKeys.length;
+    let done = total - todo.length;
+    const emit = () => window.dispatchEvent(new CustomEvent('mc-migration-progress', { detail: { total, done } }));
+    emit();
+
+    let failed = 0;
+    const buffer = [];
+    const flush = async () => {
+      if (!buffer.length) return;
+      const rows = buffer.splice(0, buffer.length);
+      await supabaseSetMany(rows);
+    };
+
+    await runInBatches(todo, async key => {
+      try {
+        let value = await readBin(legacyIndex[key]);
+        if (typeof value !== 'string') value = JSON.stringify(value);
+        buffer.push({ key, value });
+        if (buffer.length >= 50) await flush();
+      } catch (e) {
+        failed += 1;
+        console.warn('이전 실패:', key, e);
+      }
+      done += 1;
+      emit();
+    }, 4);
+    await flush();
+
+    if (failed > 0) {
+      // 일부가 실패했으면 마커를 남기지 않는다. 다음 로딩 때 실패한 것만 이어서 시도한다.
+      throw new Error(`이전 중 ${failed}건 실패`);
     }
-    done += 1;
-    window.dispatchEvent(new CustomEvent('mc-migration-progress', { detail: { total: legacyKeys.length, done } }));
   }
 
-  await supabaseSetOne('__migrated_from_jsonbin__', 'true').catch(() => {});
+  await supabaseSetOne(MIGRATION_MARKER_KEY, 'true');
+  try { localStorage.setItem(MIGRATION_LOCAL_FLAG, '1'); } catch (e) {}
 }
 
+// ---------------------------------------------------------------
+// Supabase 기반 자동 백업
+// 가벼운 메타 정보(`backupmeta:`)와 무거운 본문(`backup:{id}:{n}`)을 나눠 저장한다.
+// 목록을 볼 때는 메타만 읽고, 복구할 때만 본문을 읽는다.
+// 저장할 때마다 만들면 낭비라서, 마지막 백업 후 일정 시간 안에는 새로 만들지 않는다.
+// ---------------------------------------------------------------
+const BACKUP_META_PREFIX = 'backupmeta:';
+const BACKUP_CHUNK_SIZE = 300;
+const BACKUP_MIN_INTERVAL_MS = 5 * 60 * 1000;
+let _lastBackupAt = 0;
+
+async function createAutomaticBackup({ movies, customFormats, settings, reason = '저장' }) {
+  const now = Date.now();
+  if (now - _lastBackupAt < BACKUP_MIN_INTERVAL_MS) return null;
+  _lastBackupAt = now;
+
+  const job = _backupQueue.then(async () => {
+    try {
+      const id = makeBackupId();
+      const createdAt = new Date().toISOString();
+      const meta = {
+        id, createdAt, reason,
+        count: movies.length,
+        customFormats: Array.isArray(customFormats) ? customFormats : [],
+        settings: settings || DEFAULT_SETTINGS,
+      };
+
+      // 본문(영화 목록)을 먼저 저장하고, 메타는 맨 마지막에 저장한다 (본문 없는 메타가 생기지 않도록).
+      const chunkRows = [];
+      for (let i = 0; i < movies.length; i += BACKUP_CHUNK_SIZE) {
+        chunkRows.push({
+          key: `${BACKUP_PREFIX}${id}:${String(i / BACKUP_CHUNK_SIZE).padStart(4, '0')}`,
+          value: JSON.stringify(movies.slice(i, i + BACKUP_CHUNK_SIZE)),
+        });
+      }
+      if (chunkRows.length) await supabaseSetMany(chunkRows, 5);
+      await supabaseSetOne(`${BACKUP_META_PREFIX}${id}`, JSON.stringify(meta));
+
+      // 오래된 백업 정리 (실패해도 무시)
+      try {
+        const metaKeys = (await supabaseListKeys(BACKUP_META_PREFIX)).sort();
+        const old = metaKeys.slice(0, Math.max(0, metaKeys.length - BACKUP_LIMIT));
+        for (const mk of old) {
+          const oldId = mk.slice(BACKUP_META_PREFIX.length);
+          await supabaseDeleteByPrefix(`${BACKUP_PREFIX}${oldId}:`).catch(() => {});
+          await supabaseDeleteOne(mk).catch(() => {});
+        }
+      } catch (_) {}
+
+      return { id, createdAt, reason, count: meta.count, customFormats: meta.customFormats, settings: meta.settings };
+    } catch (e) {
+      _lastBackupAt = 0; // 실패했으면 다음 저장 때 바로 다시 시도할 수 있게 한다.
+      throw e;
+    }
+  });
+  _backupQueue = job.catch(() => {});
+  return job;
+}
+
+async function listAutomaticBackups() {
+  const rows = await supabaseGetAllByPrefix(BACKUP_META_PREFIX);
+  const result = rows
+    .map(r => { try { return JSON.parse(r.value); } catch (_) { return null; } })
+    .filter(meta => meta && meta.id);
+  return result.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, BACKUP_LIMIT);
+}
+
+async function restoreAutomaticBackup(backup) {
+  const chunkRows = await supabaseGetAllByPrefix(`${BACKUP_PREFIX}${backup.id}:`);
+  const restored = [];
+  chunkRows.sort((a, b) => a.key.localeCompare(b.key)).forEach(r => {
+    const list = JSON.parse(r.value);
+    if (Array.isArray(list)) restored.push(...list);
+  });
+  if (restored.length === 0 && backup.count > 0) {
+    throw new Error('백업 본문을 찾지 못했어요');
+  }
+
+  // 안전한 순서: 백업 내용을 먼저 저장(덮어쓰기)하고, 그 뒤에 백업에 없는 현재 영화만 지운다.
+  await supabaseSetMany(restored.map(m => ({ key: `movie:${m.id}`, value: JSON.stringify(m) })));
+  const restoredKeys = new Set(restored.map(m => `movie:${m.id}`));
+  const currentKeys = await supabaseListKeys('movie:');
+  const extra = currentKeys.filter(k => !restoredKeys.has(k));
+  for (let i = 0; i < extra.length; i += 20) {
+    await Promise.all(extra.slice(i, i + 20).map(k => supabaseDeleteOne(k)));
+  }
+  await window.storage.set('custom-formats', JSON.stringify(backup.customFormats || []));
+  await window.storage.set('settings', JSON.stringify(backup.settings || DEFAULT_SETTINGS));
+  return restored;
+}
 
 // ---------------------------------------------------------------
 // 아이콘 (lucide-react 없이 쓰기 위한 간단한 대체 SVG 아이콘)
@@ -2143,6 +2212,7 @@ function MovieCollectionApp() {
   async function makeBackupAfterSave(nextMovies, reason, snapshot = {}) {
     try {
       const nextBackups = await createAutomaticBackup({ movies: nextMovies, customFormats: snapshot.customFormats ?? customFormats, settings: snapshot.settings ?? settings, reason });
+      if (!nextBackups) return; // 최근에 이미 백업해서 이번엔 건너뜀
       setBackups(prev => [{ ...nextBackups }, ...prev.filter(b => b.id !== nextBackups.id)].slice(0, BACKUP_LIMIT));
     } catch (e) {
       console.error('자동 백업 실패', e);
