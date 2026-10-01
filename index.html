@@ -1333,15 +1333,18 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
                       <button type="button" className="btn btn--ghost btn--sm" onClick={confirmNewCategory}>추가</button>
                     </div>
                   ) : (
-                    <select value={locCategoryName} onChange={e => {
-                      if (e.target.value === '__new__') { setNewCategoryMode(true); return; }
-                      const cat = categoriesForSection.find(c => c.name === e.target.value);
-                      setLocCategoryName(e.target.value);
-                      setLocCategoryNumber(cat ? cat.number : '');
-                    }}>
+                    <select
+                      value={categoriesForSection.find(c => c.name === locCategoryName && c.number === locCategoryNumber)?.id || ''}
+                      onChange={e => {
+                        if (e.target.value === '__new__') { setNewCategoryMode(true); return; }
+                        const cat = categoriesForSection.find(c => c.id === e.target.value);
+                        setLocCategoryName(cat ? cat.name : '');
+                        setLocCategoryNumber(cat ? cat.number : '');
+                      }}
+                    >
                       <option value="">카테고리 선택</option>
                       {categoriesForSection.sort((a, b) => a.number - b.number).map(c => (
-                        <option key={c.id} value={c.name}>({c.number}) {c.name}</option>
+                        <option key={c.id} value={c.id}>({c.number}) {c.name}</option>
                       ))}
                       <option value="__new__">+ 새 카테고리 추가</option>
                     </select>
@@ -1457,29 +1460,6 @@ function BulkImportModal({ onCancel, onConfirm, saving }) {
               )}
             </div>
           )}
-
-          <div className="field backup-section">
-            <span>자동 백업</span>
-            <p className="hint-text-small">저장에 성공할 때마다 현재 영화 목록과 설정을 별도 백업하고, 최근 10개를 유지해요. 복구해도 백업 자체는 삭제되지 않아요.</p>
-            <div className="backup-actions">
-              <button type="button" className="btn btn--ghost btn--sm" onClick={onRefreshBackups} disabled={backupBusy}>
-                {backupBusy ? <><Loader2 size={13} className="spin" /> 확인 중...</> : '백업 새로고침'}
-              </button>
-            </div>
-            <div className="backup-list">
-              {backups.length === 0 ? <div className="hint-text-small">아직 자동 백업이 없어요. 다음 저장부터 자동으로 만들어집니다.</div> : backups.map(b => (
-                <div className="backup-row" key={b.id}>
-                  <div>
-                    <div className="backup-row__date">{new Date(b.createdAt).toLocaleString('ko-KR')}</div>
-                    <div className="backup-row__meta">{b.count}편 · {b.reason || '저장'}</div>
-                  </div>
-                  <button type="button" className="btn btn--ghost btn--sm" onClick={() => onRestoreBackup(b)} disabled={backupBusy}>
-                    <RotateCcw size={13} /> 복구
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
         <div className="drawer__foot">
           <div />
@@ -2399,7 +2379,7 @@ function MovieCollectionApp() {
   }
 
   function handleAddCategory(section, number, name) {
-    if (settings.categories.some(c => c.section === section && c.name === name)) return;
+    if (settings.categories.some(c => c.section === section && c.number === number)) return;
     persistSettings({ ...settings, categories: [...settings.categories, { id: uid(), section, number, name }] });
   }
 
