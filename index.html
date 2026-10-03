@@ -1920,6 +1920,16 @@ const APP_CSS = `
         .segmented button.is-active { background: var(--gold); color: var(--bg); font-weight: 600; }
         .segmented--view { flex: none; }
         .segmented--view button { padding: 9px 14px; white-space: nowrap; }
+
+        .shelf-toggle-btn.is-active { background: var(--gold); border-color: var(--gold); color: var(--bg); font-weight: 700; }
+        .shelf-view { display: flex; flex-direction: column; gap: 16px; }
+        .shelf-nav__sections, .shelf-nav__categories { display: flex; flex-wrap: wrap; gap: 8px; }
+        .shelf-pill { background: var(--bg-panel); border: 1px solid var(--line-dark); color: var(--fg-soft); border-radius: 999px; padding: 7px 14px; font-size: 13px; font-weight: 600; }
+        .shelf-pill:hover { border-color: var(--gold); color: var(--fg); }
+        .shelf-pill.is-active { background: var(--gold); border-color: var(--gold); color: var(--bg); }
+        .shelf-pill--individual { border-style: dashed; }
+        .shelf-slot-empty { border: 1.5px dashed var(--line); border-radius: 12px; min-height: 100px; display: flex; align-items: center; justify-content: center; color: var(--ink-soft); font-size: 13px; font-weight: 700; background: color-mix(in srgb, var(--paper-2) 50%, transparent); }
+        .poster-slot-empty { width: 118px; height: 177px; border: 1.5px dashed var(--line); border-radius: 4px; display: flex; align-items: center; justify-content: center; color: var(--ink-soft); font-size: 13px; font-weight: 700; background: color-mix(in srgb, var(--paper-2) 50%, transparent); }
         .format-filter-list { display: flex; flex-direction: column; gap: 4px; }
         .format-filter-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--fg-soft); padding: 6px 8px; border-radius: 7px; }
         .format-filter-item.is-active { background: color-mix(in srgb, var(--gold) 16%, transparent); color: var(--fg); }
@@ -2151,6 +2161,140 @@ function saveLocalCache(data) {
   }
 }
 
+const SHELF_INDIVIDUAL = '__individual__';
+
+function ShelfSlotEmpty({ n, gallery }) {
+  return (
+    <div className={gallery ? 'poster-slot-empty' : 'shelf-slot-empty'}>
+      <span>{n}</span>
+    </div>
+  );
+}
+
+// 물리 매체(DVD/블루레이 등)를 실제 보관함처럼 섹션 → 카테고리 → 진열번호(최대 24)
+// 순으로 탐색하는 뷰. 빈 칸은 비어있는 상태 그대로 보여준다.
+// 섹션에 묶이지 않은 '개별 보관' 항목은 별도 탭으로 모아서 보여준다.
+function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, shelfCategoryId, setShelfCategoryId, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
+  const physicalMovies = useMemo(
+    () => movies.filter(m => m.physicalLocation && (m.physicalLocation.individual || m.physicalLocation.categoryName)),
+    [movies]
+  );
+  const sections = useMemo(() => settings.sections.slice().sort((a, b) => a.number - b.number), [settings.sections]);
+  const isIndividual = shelfSection === SHELF_INDIVIDUAL;
+  const categoriesForSection = useMemo(() => {
+    if (isIndividual || !shelfSection) return [];
+    return settings.categories.filter(c => c.section === shelfSection).sort((a, b) => a.number - b.number);
+  }, [settings.categories, shelfSection, isIndividual]);
+
+  useEffect(() => {
+    if (!shelfSection) setShelfSection(sections.length > 0 ? sections[0].name : SHELF_INDIVIDUAL);
+  }, [sections, shelfSection]);
+
+  useEffect(() => {
+    if (!isIndividual && shelfSection && categoriesForSection.length > 0 && !categoriesForSection.some(c => c.id === shelfCategoryId)) {
+      setShelfCategoryId(categoriesForSection[0].id);
+    }
+  }, [shelfSection, categoriesForSection, isIndividual]);
+
+  const individualMovies = useMemo(() => physicalMovies.filter(m => m.physicalLocation.individual), [physicalMovies]);
+  const selectedCategory = categoriesForSection.find(c => c.id === shelfCategoryId) || null;
+
+  const slotMovies = useMemo(() => {
+    if (isIndividual || !selectedCategory) return {};
+    const map = {};
+    physicalMovies.forEach(m => {
+      const loc = m.physicalLocation;
+      if (loc.section === shelfSection && loc.categoryName === selectedCategory.name && String(loc.categoryNumber) === String(selectedCategory.number)) {
+        const n = Number(loc.itemNumber);
+        if (n >= 1 && n <= 24) map[n] = m;
+      }
+    });
+    return map;
+  }, [physicalMovies, shelfSection, selectedCategory, isIndividual]);
+
+  const isGallery = viewMode === 'gallery';
+  const slotNumbers = useMemo(() => Array.from({ length: 24 }, (_, i) => i + 1), []);
+
+  return (
+    <div className="shelf-view">
+      <div className="shelf-nav__sections">
+        {sections.map(s => (
+          <button
+            key={s.id}
+            type="button"
+            className={`shelf-pill${shelfSection === s.name ? ' is-active' : ''}`}
+            onClick={() => { setShelfSection(s.name); setShelfCategoryId(''); }}
+          >
+            ({s.number}) {s.name}
+          </button>
+        ))}
+        <button
+          type="button"
+          className={`shelf-pill shelf-pill--individual${isIndividual ? ' is-active' : ''}`}
+          onClick={() => { setShelfSection(SHELF_INDIVIDUAL); setShelfCategoryId(''); }}
+        >
+          개별 보관
+        </button>
+      </div>
+
+      {!isIndividual && (
+        <div className="shelf-nav__categories">
+          {categoriesForSection.length === 0 ? (
+            <p className="hint-text-small">이 섹션엔 아직 카테고리가 없어요. 설정에서 추가해주세요.</p>
+          ) : (
+            categoriesForSection.map(c => (
+              <button
+                key={c.id}
+                type="button"
+                className={`shelf-pill${shelfCategoryId === c.id ? ' is-active' : ''}`}
+                onClick={() => setShelfCategoryId(c.id)}
+              >
+                ({c.number}) {c.name}
+              </button>
+            ))
+          )}
+        </div>
+      )}
+
+      {isIndividual ? (
+        individualMovies.length === 0 ? (
+          <div className="empty-state"><p>개별 보관으로 등록된 영화가 아직 없어요.</p></div>
+        ) : isGallery ? (
+          <div className="poster-gallery">
+            {individualMovies.map(m => <PosterMovieTile key={m.id} movie={m} onEdit={onEdit} />)}
+          </div>
+        ) : (
+          <div className="grid">
+            {individualMovies.map(m => (
+              <MovieCard key={m.id} movie={m} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />
+            ))}
+          </div>
+        )
+      ) : selectedCategory ? (
+        isGallery ? (
+          <div className="poster-gallery">
+            {slotNumbers.map(n => (
+              slotMovies[n]
+                ? <PosterMovieTile key={n} movie={slotMovies[n]} onEdit={onEdit} />
+                : <ShelfSlotEmpty key={n} n={n} gallery />
+            ))}
+          </div>
+        ) : (
+          <div className="grid">
+            {slotNumbers.map(n => (
+              slotMovies[n]
+                ? <MovieCard key={n} movie={slotMovies[n]} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />
+                : <ShelfSlotEmpty key={n} n={n} />
+            ))}
+          </div>
+        )
+      ) : (
+        <div className="empty-state"><p>카테고리를 선택해주세요.</p></div>
+      )}
+    </div>
+  );
+}
+
 function MovieCollectionApp() {
   const [loaded, setLoaded] = useState(false);
   const [movies, setMovies] = useState([]);
@@ -2163,6 +2307,9 @@ function MovieCollectionApp() {
   const [activeFilter, setActiveFilter] = useState(null);
   const [sortBy, setSortBy] = useState('recent');
   const [viewMode, setViewMode] = useState('card');
+  const [shelfModeOn, setShelfModeOn] = useState(false);
+  const [shelfSection, setShelfSection] = useState('');
+  const [shelfCategoryId, setShelfCategoryId] = useState('');
   const [expandedSeries, setExpandedSeries] = useState(() => new Set());
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(96);
@@ -2703,6 +2850,13 @@ function MovieCollectionApp() {
             <button type="button" className={viewMode === 'card' ? 'is-active' : ''} onClick={() => setViewMode('card')}>카드형</button>
             <button type="button" className={viewMode === 'gallery' ? 'is-active' : ''} onClick={() => setViewMode('gallery')}>진열장</button>
           </div>
+          <button
+            type="button"
+            className={`btn btn--ghost shelf-toggle-btn${shelfModeOn ? ' is-active' : ''}`}
+            onClick={() => setShelfModeOn(v => !v)}
+          >
+            보관함
+          </button>
           <select className="sort-select" value={sortBy} onChange={e => setSortBy(e.target.value)}>
             <option value="recent">최근 추가순</option>
             <option value="year-desc">연도 최신순</option>
@@ -2730,6 +2884,20 @@ function MovieCollectionApp() {
 
         {!loaded ? (
           <div className="empty-state">불러오는 중이에요...</div>
+        ) : shelfModeOn ? (
+          <ShelfView
+            movies={movies}
+            settings={settings}
+            viewMode={viewMode}
+            shelfSection={shelfSection}
+            setShelfSection={setShelfSection}
+            shelfCategoryId={shelfCategoryId}
+            setShelfCategoryId={setShelfCategoryId}
+            onEdit={mv => { setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }}
+            onFilter={openFilter}
+            onMoveToOwned={handleMoveToOwned}
+            onAddSequel={handleAddSequel}
+          />
         ) : filteredMovies.length === 0 ? (
           <div className="empty-state">
             <h3>{movies.length === 0 ? '아직 등록된 영화가 없어요' : '조건에 맞는 영화가 없어요'}</h3>
@@ -2766,7 +2934,7 @@ function MovieCollectionApp() {
           </div>
         )}
 
-        {loaded && filteredMovies.length > 0 && totalPages > 1 && (
+        {loaded && !shelfModeOn && filteredMovies.length > 0 && totalPages > 1 && (
           <div className="pagination">
             <button type="button" className="btn btn--ghost btn--sm" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>이전</button>
             <span className="pagination__info">{page} / {totalPages} 페이지</span>
