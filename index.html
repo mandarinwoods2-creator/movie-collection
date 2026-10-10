@@ -861,6 +861,7 @@ function parseBulkLine(raw) {
       seriesName: '',
       seriesOrder: '',
       seriesUnofficial: false,
+      seriesRemake: false,
       notes: '',
       createdAt: Date.now(),
     },
@@ -960,11 +961,12 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   );
   const [customText, setCustomText] = useState('');
 
+  const seedLocation = seed?.physicalLocation || null;
   const [locMode, setLocMode] = useState(initial?.physicalLocation?.individual ? 'individual' : 'section');
-  const [locSection, setLocSection] = useState(initial?.physicalLocation?.section || settings.sections[0]?.name || '');
-  const [locCategoryName, setLocCategoryName] = useState(initial?.physicalLocation?.categoryName || '');
-  const [locCategoryNumber, setLocCategoryNumber] = useState(initial?.physicalLocation?.categoryNumber || '');
-  const [locItemNumber, setLocItemNumber] = useState(initial?.physicalLocation?.itemNumber || '');
+  const [locSection, setLocSection] = useState(initial?.physicalLocation?.section || seedLocation?.section || settings.sections[0]?.name || '');
+  const [locCategoryName, setLocCategoryName] = useState(initial?.physicalLocation?.categoryName || seedLocation?.categoryName || '');
+  const [locCategoryNumber, setLocCategoryNumber] = useState(initial?.physicalLocation?.categoryNumber ?? seedLocation?.categoryNumber ?? '');
+  const [locItemNumber, setLocItemNumber] = useState(initial?.physicalLocation?.itemNumber ?? seedLocation?.itemNumber ?? '');
   const [newSectionMode, setNewSectionMode] = useState(false);
   const [newSectionText, setNewSectionText] = useState('');
   const [newCategoryMode, setNewCategoryMode] = useState(false);
@@ -977,6 +979,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   const [seriesName, setSeriesName] = useState(initial?.seriesName || seed?.seriesName || '');
   const [seriesOrder, setSeriesOrder] = useState(initial?.seriesOrder ?? seed?.seriesOrder ?? '');
   const [seriesUnofficial, setSeriesUnofficial] = useState(initial?.seriesUnofficial ?? seed?.seriesUnofficial ?? false);
+  const [seriesRemake, setSeriesRemake] = useState(initial?.seriesRemake ?? seed?.seriesRemake ?? false);
   const [posterUrl, setPosterUrl] = useState(initial?.posterUrl || '');
   const [manualUrlDraft, setManualUrlDraft] = useState('');
   const [posterBusy, setPosterBusy] = useState(false);
@@ -989,7 +992,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
     return Array.from(set);
   }, [movies]);
 
-  const hasPhysical = selectedFormats.some(f => PHYSICAL_FORMATS.includes(f)) || !!customText.trim();
+  const hasPhysical = selectedFormats.some(f => PHYSICAL_FORMATS.includes(f)) || !!customText.trim() || !!seedLocation;
   const categoriesForSection = settings.categories.filter(c => c.section === locSection);
 
   useEffect(() => {
@@ -1114,6 +1117,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
       seriesName: trimmedSeriesName,
       seriesOrder: trimmedSeriesName ? seriesOrder : '',
       seriesUnofficial: trimmedSeriesName ? seriesUnofficial : false,
+      seriesRemake: trimmedSeriesName ? seriesRemake : false,
       hashtags: parseListInput(hashtagsRaw, true),
       notes: notes.trim(),
       createdAt: initial?.createdAt || Date.now(),
@@ -1245,10 +1249,16 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
               {existingSeriesNames.map(n => <option key={n} value={n} />)}
             </datalist>
             {seriesName.trim() && (
-              <label className="checkbox-row">
-                <input type="checkbox" checked={seriesUnofficial} onChange={e => setSeriesUnofficial(e.target.checked)} />
-                비공식 시리즈 (국내 마케팅용 등으로 이름만 붙은 별개 작품)
-              </label>
+              <>
+                <label className="checkbox-row">
+                  <input type="checkbox" checked={seriesUnofficial} onChange={e => setSeriesUnofficial(e.target.checked)} />
+                  비공식 시리즈 (국내 마케팅용 등으로 이름만 붙은 별개 작품)
+                </label>
+                <label className="checkbox-row">
+                  <input type="checkbox" checked={seriesRemake} onChange={e => setSeriesRemake(e.target.checked)} />
+                  리메이크 (정식 시리즈는 아니지만 리메이크작이라 함께 묶어두기)
+                </label>
+              </>
             )}
           </div>
 
@@ -1334,7 +1344,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
                     </div>
                   ) : (
                     <select
-                      value={categoriesForSection.find(c => c.name === locCategoryName && c.number === locCategoryNumber)?.id || ''}
+                      value={categoriesForSection.find(c => c.name === locCategoryName && String(c.number) === String(locCategoryNumber))?.id || ''}
                       onChange={e => {
                         if (e.target.value === '__new__') { setNewCategoryMode(true); return; }
                         const cat = categoriesForSection.find(c => c.id === e.target.value);
@@ -1402,7 +1412,37 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   );
 }
 
-function BulkImportModal({ onCancel, onConfirm, saving }) {
+// 보관함 빈 칸을 눌렀을 때, 영화 하나를 바로 추가할지 여러 개를 붙여넣을지 고르는 작은 선택창.
+function SlotAddChoiceModal({ slot, onCancel, onChooseSingle, onChooseBulk }) {
+  return (
+    <div className="drawer-backdrop" onClick={onCancel}>
+      <div className="slot-choice" onClick={e => e.stopPropagation()}>
+        <div className="drawer__head">
+          <h2>{slot.section} ({slot.categoryNumber}) {slot.categoryName} · {slot.itemNumber}번에 추가</h2>
+          <button type="button" className="icon-btn" onClick={onCancel}><X size={18} /></button>
+        </div>
+        <div className="slot-choice__body">
+          <button type="button" className="slot-choice__option" onClick={onChooseSingle}>
+            <Plus size={18} />
+            <div>
+              <b>영화 한 편 추가</b>
+              <p>이 칸에 영화 정보를 직접 입력해요.</p>
+            </div>
+          </button>
+          <button type="button" className="slot-choice__option" onClick={onChooseBulk}>
+            <Upload size={18} />
+            <div>
+              <b>목록 붙여넣기</b>
+              <p>이 번호부터 이어서 여러 편을 한 번에 등록해요.</p>
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BulkImportModal({ onCancel, onConfirm, saving, locationSeed }) {
   const [text, setText] = useState('');
   const [parsed, setParsed] = useState(null);
 
@@ -1416,6 +1456,20 @@ function BulkImportModal({ onCancel, onConfirm, saving }) {
       if (result.ok) ok.push(result.data);
       else errors.push(result.error);
     }
+    if (locationSeed) {
+      let n = Number(locationSeed.itemNumber);
+      ok.forEach(m => {
+        if (n <= 24) {
+          m.physicalLocation = {
+            section: locationSeed.section,
+            categoryName: locationSeed.categoryName,
+            categoryNumber: locationSeed.categoryNumber,
+            itemNumber: n,
+          };
+          n += 1;
+        }
+      });
+    }
     setParsed({ ok, errors });
   }
 
@@ -1427,6 +1481,11 @@ function BulkImportModal({ onCancel, onConfirm, saving }) {
           <button type="button" className="icon-btn" onClick={onCancel}><X size={18} /></button>
         </div>
         <div className="drawer__body">
+          {locationSeed && (
+            <p className="hint-text">
+              <b>{locationSeed.section} ({locationSeed.categoryNumber}) {locationSeed.categoryName}</b>의 <b>{locationSeed.itemNumber}번</b>부터 순서대로 번호가 매겨져요 (최대 24번까지).
+            </p>
+          )}
           <p className="hint-text">
             기존에 쓰던 형식 그대로 붙여넣으세요.<br />
             제목(원제)_국가_장르_년도_감독_배우1, 배우2 #태그1 #태그2
@@ -1443,10 +1502,16 @@ function BulkImportModal({ onCancel, onConfirm, saving }) {
           {parsed && (
             <div className="preview-box">
               <p className="preview-summary">인식됨 {parsed.ok.length}건{parsed.errors.length > 0 ? ` · 인식 실패 ${parsed.errors.length}건` : ''}</p>
+              {locationSeed && parsed.ok.some(m => !m.physicalLocation) && (
+                <p className="field-error">24번을 넘어가는 항목은 보관 위치 없이 등록돼요. 등록 후 개별적으로 위치를 지정해주세요.</p>
+              )}
               {parsed.ok.length > 0 && (
                 <ul className="preview-list">
                   {parsed.ok.map(m => (
-                    <li key={m.id}>{m.titleKr} <span className="preview-meta">({m.year} · {m.director})</span></li>
+                    <li key={m.id}>
+                      {m.titleKr} <span className="preview-meta">({m.year} · {m.director})</span>
+                      {m.physicalLocation && <span className="preview-meta"> · {m.physicalLocation.itemNumber}번</span>}
+                    </li>
                   ))}
                 </ul>
               )}
@@ -1678,16 +1743,16 @@ function PosterMovieTile({ movie, onEdit }) {
   return (
     <button
       type="button"
-      className="poster-tile"
+      className={`poster-tile${movie.status === 'wishlist' ? ' poster-tile--unowned' : ''}`}
       onClick={() => onEdit(movie)}
       title={movie.titleKr}
     >
       <div
         className="poster-tile__frame"
-        style={sColor ? { borderTopColor: sColor, borderTopStyle: movie.seriesUnofficial ? 'dashed' : 'solid' } : undefined}
+        style={sColor ? { borderTopColor: sColor, borderTopStyle: movie.seriesUnofficial ? 'dashed' : movie.seriesRemake ? 'dotted' : 'solid' } : undefined}
       >
         <Poster url={movie.posterUrl} size="gallery" />
-        {movie.status === 'wishlist' && <span className="poster-tile__wishlist-dot" title="미보유" />}
+        {movie.status === 'wishlist' && <span className="poster-tile__wishlist-tag">미보유</span>}
         <div className="poster-tile__overlay">
           <span className="poster-tile__title">{movie.titleKr}</span>
           <StarRating value={movie.rating} readOnly size={10} />
@@ -1769,8 +1834,8 @@ function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
   const hasMoreInfo = !!(movie.synopsis || movie.notes);
   return (
     <div
-      className="card"
-      style={sColor ? { borderTop: `3px ${movie.seriesUnofficial ? 'dashed' : 'solid'} ${sColor}` } : undefined}
+      className={`card${movie.status === 'wishlist' ? ' card--unowned' : ''}`}
+      style={sColor ? { borderTop: `3px ${movie.seriesUnofficial ? 'dashed' : movie.seriesRemake ? 'dotted' : 'solid'} ${sColor}` } : undefined}
     >
       <Poster url={movie.posterUrl} size="card" />
       <div className="card__body">
@@ -1792,6 +1857,7 @@ function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
               <Link2 size={11} />
               {movie.seriesName}{movie.seriesOrder !== '' && movie.seriesOrder != null ? ` #${movie.seriesOrder}` : ''}
               {movie.seriesUnofficial && <span className="series-badge__unofficial">비공식</span>}
+              {movie.seriesRemake && <span className="series-badge__unofficial">리메이크</span>}
             </button>
             <button type="button" className="add-sequel-btn" onClick={() => onAddSequel(movie)} title="이 시리즈에 새 작품 추가">
               <PlusCircle size={12} /> 시리즈에 추가
@@ -1928,8 +1994,17 @@ const APP_CSS = `
         .shelf-pill:hover { border-color: var(--gold); color: var(--fg); }
         .shelf-pill.is-active { background: var(--gold); border-color: var(--gold); color: var(--bg); }
         .shelf-pill--individual { border-style: dashed; }
-        .shelf-slot-empty { border: 1.5px dashed var(--line); border-radius: 12px; min-height: 100px; display: flex; align-items: center; justify-content: center; color: var(--ink-soft); font-size: 13px; font-weight: 700; background: color-mix(in srgb, var(--paper-2) 50%, transparent); }
-        .poster-slot-empty { width: 118px; height: 177px; border: 1.5px dashed var(--line); border-radius: 4px; display: flex; align-items: center; justify-content: center; color: var(--ink-soft); font-size: 13px; font-weight: 700; background: color-mix(in srgb, var(--paper-2) 50%, transparent); }
+        .shelf-slot-empty, .poster-slot-empty { border: 1.5px dashed var(--line); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: var(--ink-soft); font-size: 13px; font-weight: 700; background: color-mix(in srgb, var(--paper-2) 50%, transparent); cursor: pointer; }
+        .shelf-slot-empty { border-radius: 12px; min-height: 100px; }
+        .poster-slot-empty { width: 118px; height: 177px; border-radius: 4px; }
+        .shelf-slot-empty:hover, .poster-slot-empty:hover { border-color: var(--gold); color: var(--gold); background: color-mix(in srgb, var(--gold) 10%, transparent); }
+
+        .slot-choice { width: min(380px, 100%); background: var(--paper); border-radius: 14px; overflow: hidden; align-self: center; margin: auto; box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
+        .slot-choice__body { padding: 18px 22px 22px; display: flex; flex-direction: column; gap: 10px; }
+        .slot-choice__option { display: flex; align-items: center; gap: 12px; text-align: left; border: 1px solid var(--line); border-radius: 10px; padding: 14px; color: var(--ink); }
+        .slot-choice__option:hover { border-color: var(--gold); background: color-mix(in srgb, var(--gold) 8%, transparent); }
+        .slot-choice__option b { display: block; font-size: 14px; margin-bottom: 2px; }
+        .slot-choice__option p { margin: 0; font-size: 12px; color: var(--ink-soft); }
         .format-filter-list { display: flex; flex-direction: column; gap: 4px; }
         .format-filter-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--fg-soft); padding: 6px 8px; border-radius: 7px; }
         .format-filter-item.is-active { background: color-mix(in srgb, var(--gold) 16%, transparent); color: var(--fg); }
@@ -2004,7 +2079,11 @@ const APP_CSS = `
         .card__bottom { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 2px; padding-top: 9px; border-top: 1px solid var(--line); }
         .status-dot { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; }
         .status-dot--owned { background: rgba(74,90,58,0.15); color: #4A5A3A; }
-        .status-dot--wishlist { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+        .status-dot--wishlist { background: var(--accent); color: var(--paper); font-weight: 800; padding: 3px 10px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent); }
+        .card--unowned { background: color-mix(in srgb, var(--accent) 8%, var(--paper)); outline: 2px dashed color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: -3px; }
+        .card--unowned .poster img { filter: saturate(0.5) opacity(0.82); }
+        .poster-tile--unowned .poster-tile__frame { outline: 2px dashed var(--accent); outline-offset: -2px; }
+        .poster-tile--unowned .poster img { filter: saturate(0.45) opacity(0.8); }
         .format-tag { font-size: 11px; color: var(--ink-soft); background: var(--paper-2); padding: 3px 9px; border-radius: 999px; }
         .location-tag { font-size: 11px; color: var(--ink-soft); display: inline-flex; align-items: center; gap: 3px; }
         .move-owned-btn { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 999px; padding: 4px 10px; }
@@ -2027,7 +2106,7 @@ const APP_CSS = `
         .poster-gallery { display: flex; flex-wrap: wrap; gap: 12px; }
         .poster-tile { padding: 0; border: none; background: none; cursor: pointer; }
         .poster-tile__frame { position: relative; border-radius: 4px; overflow: hidden; border-top: 4px solid transparent; box-shadow: 0 1px 3px rgba(0,0,0,0.18); }
-        .poster-tile__wishlist-dot { position: absolute; top: 6px; right: 6px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); border: 1.5px solid #fff; }
+        .poster-tile__wishlist-tag { position: absolute; top: 6px; right: 6px; background: var(--accent); color: var(--paper); font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 999px; box-shadow: 0 1px 4px rgba(0,0,0,0.35); z-index: 1; }
         .poster-tile__overlay { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(to top, rgba(0,0,0,0.82), transparent); padding: 16px 7px 6px; opacity: 0; transition: opacity 0.15s ease; display: flex; flex-direction: column; gap: 3px; text-align: left; }
         .poster-tile:hover .poster-tile__overlay, .poster-tile:focus-visible .poster-tile__overlay { opacity: 1; }
         .poster-tile__title { color: #fff; font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -2163,18 +2242,19 @@ function saveLocalCache(data) {
 
 const SHELF_INDIVIDUAL = '__individual__';
 
-function ShelfSlotEmpty({ n, gallery }) {
+function ShelfSlotEmpty({ n, gallery, onClick }) {
   return (
-    <div className={gallery ? 'poster-slot-empty' : 'shelf-slot-empty'}>
+    <button type="button" className={gallery ? 'poster-slot-empty' : 'shelf-slot-empty'} onClick={onClick} title={`${n}번 칸에 영화 추가`}>
+      <Plus size={gallery ? 16 : 18} />
       <span>{n}</span>
-    </div>
+    </button>
   );
 }
 
 // 물리 매체(DVD/블루레이 등)를 실제 보관함처럼 섹션 → 카테고리 → 진열번호(최대 24)
 // 순으로 탐색하는 뷰. 빈 칸은 비어있는 상태 그대로 보여준다.
 // 섹션에 묶이지 않은 '개별 보관' 항목은 별도 탭으로 모아서 보여준다.
-function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, shelfCategoryId, setShelfCategoryId, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
+function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, shelfCategoryId, setShelfCategoryId, onEdit, onFilter, onMoveToOwned, onAddSequel, onAddAtSlot }) {
   const physicalMovies = useMemo(
     () => movies.filter(m => m.physicalLocation && (m.physicalLocation.individual || m.physicalLocation.categoryName)),
     [movies]
@@ -2276,7 +2356,7 @@ function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, 
             {slotNumbers.map(n => (
               slotMovies[n]
                 ? <PosterMovieTile key={n} movie={slotMovies[n]} onEdit={onEdit} />
-                : <ShelfSlotEmpty key={n} n={n} gallery />
+                : <ShelfSlotEmpty key={n} n={n} gallery onClick={() => onAddAtSlot({ section: shelfSection, categoryName: selectedCategory.name, categoryNumber: selectedCategory.number, itemNumber: n })} />
             ))}
           </div>
         ) : (
@@ -2284,7 +2364,7 @@ function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, 
             {slotNumbers.map(n => (
               slotMovies[n]
                 ? <MovieCard key={n} movie={slotMovies[n]} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />
-                : <ShelfSlotEmpty key={n} n={n} />
+                : <ShelfSlotEmpty key={n} n={n} onClick={() => onAddAtSlot({ section: shelfSection, categoryName: selectedCategory.name, categoryNumber: selectedCategory.number, itemNumber: n })} />
             ))}
           </div>
         )
@@ -2318,6 +2398,8 @@ function MovieCollectionApp() {
   const [editingMovie, setEditingMovie] = useState(null);
   const [formSeed, setFormSeed] = useState(null);
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkLocationSeed, setBulkLocationSeed] = useState(null);
+  const [slotAddContext, setSlotAddContext] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState('');
   const [savingCount, setSavingCount] = useState(0);
@@ -2611,8 +2693,30 @@ function MovieCollectionApp() {
     const sameSeries = movies.filter(m => m.seriesId === baseMovie.seriesId);
     const maxOrder = Math.max(0, ...sameSeries.map(m => Number(m.seriesOrder) || 0));
     setEditingMovie(null);
-    setFormSeed({ seriesId: baseMovie.seriesId, seriesName: baseMovie.seriesName, seriesOrder: maxOrder + 1, seriesUnofficial: false });
+    setFormSeed({ seriesId: baseMovie.seriesId, seriesName: baseMovie.seriesName, seriesOrder: maxOrder + 1, seriesUnofficial: false, seriesRemake: false });
     setFormOpen(true);
+  }
+
+  function handleChooseSingleAtSlot() {
+    const slot = slotAddContext;
+    setSlotAddContext(null);
+    setEditingMovie(null);
+    setFormSeed({
+      physicalLocation: {
+        section: slot.section,
+        categoryName: slot.categoryName,
+        categoryNumber: slot.categoryNumber,
+        itemNumber: slot.itemNumber,
+      },
+    });
+    setFormOpen(true);
+  }
+
+  function handleChooseBulkAtSlot() {
+    const slot = slotAddContext;
+    setSlotAddContext(null);
+    setBulkLocationSeed(slot);
+    setBulkOpen(true);
   }
 
   async function handleBulkConfirm(newOnes) {
@@ -2640,6 +2744,7 @@ function MovieCollectionApp() {
       }
       if (saved.length === newOnes.length) {
         setBulkOpen(false);
+        setBulkLocationSeed(null);
       } else {
         window.alert(`⚠️ ${newOnes.length}편 중 ${saved.length}편만 저장됐어요. 저장되지 않은 항목은 다시 시도해 주세요.`);
       }
@@ -2897,6 +3002,7 @@ function MovieCollectionApp() {
             onFilter={openFilter}
             onMoveToOwned={handleMoveToOwned}
             onAddSequel={handleAddSequel}
+            onAddAtSlot={setSlotAddContext}
           />
         ) : filteredMovies.length === 0 ? (
           <div className="empty-state">
@@ -2967,7 +3073,23 @@ function MovieCollectionApp() {
         />
       )}
 
-      {bulkOpen && <BulkImportModal onCancel={() => setBulkOpen(false)} onConfirm={handleBulkConfirm} saving={saving} />}
+      {bulkOpen && (
+        <BulkImportModal
+          onCancel={() => { setBulkOpen(false); setBulkLocationSeed(null); }}
+          onConfirm={handleBulkConfirm}
+          saving={saving}
+          locationSeed={bulkLocationSeed}
+        />
+      )}
+
+      {slotAddContext && (
+        <SlotAddChoiceModal
+          slot={slotAddContext}
+          onCancel={() => setSlotAddContext(null)}
+          onChooseSingle={handleChooseSingleAtSlot}
+          onChooseBulk={handleChooseBulkAtSlot}
+        />
+      )}
 
       {settingsOpen && (
         <SettingsModal
