@@ -620,10 +620,8 @@ const DEFAULT_FORMATS = ['DVD', '블루레이', '왓챠', 'Apple TV', '쿠팡플
 const PHYSICAL_FORMATS = ['DVD', '블루레이'];
 const UNCLASSIFIED_FORMAT = '미분류';
 
-// 컴포넌트가 앱 상태 변경 함수를 부르기 위한 연결 지점 (앱 컴포넌트가 매 렌더마다 채운다)
 const appActions = { toggleFavorite: null };
 
-// 디스크 연속 등록: locations 배열의 항목 하나 = 디스크 한 장 = 진열 칸 하나
 const DISC_CONTENT_TYPES = [
   { key: 'main', label: '본편', short: '본편' },
   { key: 'special', label: 'Special Features', short: '스페셜' },
@@ -661,7 +659,6 @@ function locationText(l) {
     : `${l.section} · (${l.categoryNumber}) ${l.categoryName}${l.itemNumber ? ` · ${l.itemNumber}번` : ''}`;
 }
 
-// 하트(즐겨찾기) 버튼: 카드/포스터에 마우스를 올리면 나타나고, 눌러 둔 하트는 항상 보인다.
 function HeartButton({ movie, className = '', size = 15 }) {
   const on = !!movie.favorite;
   return (
@@ -1939,7 +1936,6 @@ function MovieDetailModal({ movie, onClose, onEdit, onFilter }) {
               <span className="detail-text">{movie.seriesName}{movie.seriesOrder !== '' && movie.seriesOrder != null ? ` #${movie.seriesOrder}` : ''}{movie.seriesUnofficial ? ' (비공식)' : ''}{movie.seriesRemake ? ' (리메이크)' : ''}</span>
             </div>
           )}
-
           {movie.director && (
             <div className="detail-section">
               <span className="detail-label">감독</span>
@@ -1958,7 +1954,6 @@ function MovieDetailModal({ movie, onClose, onEdit, onFilter }) {
               <span className="detail-text">{movie.synopsis}</span>
             </div>
           )}
-
           {(movie.formats && movie.formats.length > 0) && (
             <div className="detail-section">
               <span className="detail-label">매체</span>
@@ -1977,7 +1972,6 @@ function MovieDetailModal({ movie, onClose, onEdit, onFilter }) {
               ))}
             </div>
           )}
-
           {movie.hashtags && movie.hashtags.length > 0 && (
             <div className="detail-section">
               <span className="detail-label">비고 해시태그</span>
@@ -2663,6 +2657,7 @@ function MovieCollectionApp() {
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [favoriteOnly, setFavoriteOnly] = useState(false);
   const [formatFilter, setFormatFilter] = useState([]);
   const [activeFilter, setActiveFilter] = useState(null);
   const [sortBy, setSortBy] = useState('recent');
@@ -3092,6 +3087,7 @@ function MovieCollectionApp() {
   const filteredMovies = useMemo(() => {
     let list = movies.filter(m => {
       if (statusFilter !== 'all' && m.status !== statusFilter) return false;
+      if (favoriteOnly && !m.favorite) return false;
       if (formatFilter.length > 0) {
         const formats = Array.isArray(m.formats) ? m.formats : [];
         const matchesFormat = formatFilter.some(f =>
@@ -3118,13 +3114,22 @@ function MovieCollectionApp() {
     });
     list = [...list].sort((a, b) => {
       if (activeFilter?.type === 'series') return (Number(a.seriesOrder) || 0) - (Number(b.seriesOrder) || 0);
+      if (sortBy === 'rating-desc' || sortBy === 'rating-asc') {
+        const ra = typeof a.rating === 'number' ? a.rating : null;
+        const rb = typeof b.rating === 'number' ? b.rating : null;
+        if (ra == null && rb == null) return (b.createdAt || 0) - (a.createdAt || 0);
+        if (ra == null) return 1;
+        if (rb == null) return -1;
+        if (ra !== rb) return sortBy === 'rating-desc' ? rb - ra : ra - rb;
+        return (b.createdAt || 0) - (a.createdAt || 0);
+      }
       if (sortBy === 'year-asc') return (a.year || '').localeCompare(b.year || '');
       if (sortBy === 'year-desc') return (b.year || '').localeCompare(a.year || '');
       if (sortBy === 'title') return a.titleKr.localeCompare(b.titleKr, 'ko');
       return (b.createdAt || 0) - (a.createdAt || 0);
     });
     return list;
-  }, [movies, statusFilter, formatFilter, activeFilter, search, sortBy]);
+  }, [movies, statusFilter, favoriteOnly, formatFilter, activeFilter, search, sortBy]);
 
   const displayEntries = useMemo(() => buildDisplayEntries(filteredMovies, expandedSeries), [filteredMovies, expandedSeries]);
   const totalPages = Math.max(1, Math.ceil(displayEntries.length / pageSize));
@@ -3135,7 +3140,7 @@ function MovieCollectionApp() {
 
   useEffect(() => {
     setPage(1);
-  }, [statusFilter, formatFilter, activeFilter, search, sortBy, viewMode, pageSize]);
+  }, [statusFilter, favoriteOnly, formatFilter, activeFilter, search, sortBy, viewMode, pageSize]);
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
@@ -3235,6 +3240,14 @@ function MovieCollectionApp() {
         </div>
         <hr />
         <div className="sidebar-section">
+          <h3>하트</h3>
+          <div className="segmented">
+            <button type="button" className={!favoriteOnly ? 'is-active' : ''} onClick={() => setFavoriteOnly(false)}>전체</button>
+            <button type="button" className={favoriteOnly ? 'is-active' : ''} onClick={() => setFavoriteOnly(true)}>하트만 ({movies.filter(m => m.favorite).length})</button>
+          </div>
+        </div>
+        <hr />
+        <div className="sidebar-section">
           <h3>매체 / 플랫폼</h3>
           <div className="format-filter-list">
             {filterFormatOptions.map(f => (
@@ -3273,6 +3286,8 @@ function MovieCollectionApp() {
             <option value="year-desc">연도 최신순</option>
             <option value="year-asc">연도 오래된순</option>
             <option value="title">제목 가나다순</option>
+            <option value="rating-desc">별점 높은순</option>
+            <option value="rating-asc">별점 낮은순</option>
           </select>
           <button type="button" className="btn btn--ghost" onClick={() => setBulkOpen(true)}><Upload size={15} /> 목록 붙여넣기</button>
           <button type="button" className="btn btn--primary" onClick={() => { setEditingMovie(null); setFormSeed(null); setFormOpen(true); }}><Plus size={16} /> 새 영화</button>
@@ -3319,7 +3334,7 @@ function MovieCollectionApp() {
         ) : viewMode === 'gallery' ? (
           <PosterGallery
             entries={pageEntries}
-            onEdit={mv => { setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }}
+            onEdit={mv => setDetailId(mv.id)}
             onToggleSeries={handleToggleSeries}
           />
         ) : (
