@@ -620,6 +620,12 @@ const DEFAULT_FORMATS = ['DVD', '블루레이', '왓챠', 'Apple TV', '쿠팡플
 const PHYSICAL_FORMATS = ['DVD', '블루레이'];
 const UNCLASSIFIED_FORMAT = '미분류';
 
+const REGIONS = ['외화', '한국'];
+const DEFAULT_REGION = '외화';
+const sectionRegion = s => (s && s.region) || DEFAULT_REGION;
+const sectionsOfRegion = (settings, region) =>
+  settings.sections.filter(s => sectionRegion(s) === region).slice().sort((a, b) => a.number - b.number);
+
 const appActions = { toggleFavorite: null };
 
 const DISC_CONTENT_TYPES = [
@@ -1019,7 +1025,14 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
 
   const seedLocation = seed?.physicalLocation || null;
   const [locMode, setLocMode] = useState(initial?.physicalLocation?.individual ? 'individual' : 'section');
-  const [locSection, setLocSection] = useState(initial?.physicalLocation?.section || seedLocation?.section || settings.sections[0]?.name || '');
+  const initialSectionName = initial?.physicalLocation?.section || seedLocation?.section || '';
+  const [locRegion, setLocRegion] = useState(() => {
+    const sec = settings.sections.find(x => x.name === initialSectionName);
+    return sec ? sectionRegion(sec) : DEFAULT_REGION;
+  });
+  const [locSection, setLocSection] = useState(
+    initialSectionName || (sectionsOfRegion(settings, DEFAULT_REGION)[0] || {}).name || ''
+  );
   const [locCategoryName, setLocCategoryName] = useState(initial?.physicalLocation?.categoryName || seedLocation?.categoryName || '');
   const [locCategoryNumber, setLocCategoryNumber] = useState(initial?.physicalLocation?.categoryNumber ?? seedLocation?.categoryNumber ?? '');
   const [locItemNumber, setLocItemNumber] = useState(initial?.physicalLocation?.itemNumber ?? seedLocation?.itemNumber ?? '');
@@ -1063,7 +1076,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
 
   useEffect(() => {
     if (locSection && !settings.sections.some(s => s.name === locSection)) {
-      setLocSection(settings.sections[0]?.name || '');
+      setLocSection((sectionsOfRegion(settings, locRegion)[0] || {}).name || '');
       setLocCategoryName('');
       setLocCategoryNumber('');
     } else if (locCategoryName && !settings.categories.some(c => c.section === locSection && c.name === locCategoryName)) {
@@ -1079,7 +1092,6 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
     return '';
   }, [categoriesForSection]);
 
-  // 진열장 화면과 같은 기준(섹션 + 카테고리 이름 + 카테고리 번호)으로 같은 칸인지 비교한다.
   const sameShelf = l =>
     l.section === locSection &&
     l.categoryName === locCategoryName &&
@@ -1097,7 +1109,6 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [movies, locSection, locCategoryName, locCategoryNumber, initial]);
 
-  // 이 영화가 원래부터 쓰고 있던 칸은 '새로 차지하는 칸'이 아니므로 사용 중 경고에서 제외한다.
   const ownSlots = useMemo(() => {
     const set = new Set();
     if (initial) {
@@ -1144,6 +1155,18 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   const addPlanDisc = () => setDiscPlan(p => [...p, { contents: [], note: '', slot: '' }]);
   const removePlanDisc = i => setDiscPlan(p => p.filter((_, di) => di !== i));
 
+  const regionSecs = sectionsOfRegion(settings, locRegion);
+  function changeRegion(r) {
+    if (r === locRegion) return;
+    setLocRegion(r);
+    const first = sectionsOfRegion(settings, r)[0];
+    setLocSection(first ? first.name : '');
+    setLocCategoryName('');
+    setLocCategoryNumber('');
+    setNewSectionMode(false);
+    setNewCategoryMode(false);
+  }
+
   function toggleFormat(f) {
     setSelectedFormats(prev => prev.includes(f) ? prev.filter(x => x !== f) : [...prev, f]);
   }
@@ -1183,10 +1206,12 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   function confirmNewSection() {
     const val = newSectionText.trim();
     if (!val) { setNewSectionMode(false); return; }
-    onAddSection(val);
-    setLocSection(val);
-    setLocCategoryName('');
-    setLocCategoryNumber('');
+    const addedOk = onAddSection(val, locRegion);
+    if (addedOk !== false) {
+      setLocSection(val);
+      setLocCategoryName('');
+      setLocCategoryNumber('');
+    }
     setNewSectionMode(false);
     setNewSectionText('');
   }
@@ -1217,7 +1242,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
         .map((p, i) => p ? `Disc ${i + 1} (${plannedSlots[i]}번): ${p}` : '')
         .filter(Boolean);
       if (problemLines.length > 0) {
-        const detail = `섹션: ${locSection} / 카테고리: (${locCategoryNumber}) ${locCategoryName}`;
+        const detail = `${locRegion} / ${locSection} / (${locCategoryNumber}) ${locCategoryName}`;
         if (!window.confirm(`⚠️ 칸 번호 확인\n${detail}\n\n${problemLines.join('\n')}\n\n그래도 저장할까요?`)) return;
       }
     }
@@ -1437,6 +1462,13 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
 
               {locMode === 'section' && (
                 <>
+                  <span className="sub-label">구분</span>
+                  <div className="segmented">
+                    {REGIONS.map(r => (
+                      <button key={r} type="button" className={locRegion === r ? 'is-active' : ''} onClick={() => changeRegion(r)}>{r}</button>
+                    ))}
+                  </div>
+
                   <span className="sub-label">섹션</span>
                   {newSectionMode ? (
                     <input
@@ -1452,8 +1484,8 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
                       if (e.target.value === '__new__') setNewSectionMode(true);
                       else { setLocSection(e.target.value); setLocCategoryName(''); setLocCategoryNumber(''); }
                     }}>
-                      {settings.sections.length === 0 && <option value="">섹션 선택</option>}
-                      {settings.sections.slice().sort((a, b) => a.number - b.number).map(s => (
+                      {!regionSecs.some(s => s.name === locSection) && <option value="">섹션 선택</option>}
+                      {regionSecs.map(s => (
                         <option key={s.id} value={s.name}>({s.number}) {s.name}</option>
                       ))}
                       <option value="__new__">+ 새 섹션 추가</option>
@@ -1711,7 +1743,14 @@ function BulkImportModal({ onCancel, onConfirm, saving, locationSeed }) {
 }
 
 function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAddSection, onUpdateSection, onRemoveSection, onAddCategory, onUpdateCategory, onRemoveCategory, onResetSettings, backups, onRefreshBackups, onRestoreBackup, backupBusy }) {
-  const [activeSection, setActiveSection] = useState(initialSection || settings.sections[0]?.name || '');
+  const [settingsRegion, setSettingsRegion] = useState(() => {
+    const sec = settings.sections.find(x => x.name === initialSection);
+    return sec ? sectionRegion(sec) : DEFAULT_REGION;
+  });
+  const regionSections = sectionsOfRegion(settings, settingsRegion);
+  const [activeSection, setActiveSection] = useState(
+    initialSection || (sectionsOfRegion(settings, DEFAULT_REGION)[0] || {}).name || ''
+  );
   const [newSection, setNewSection] = useState('');
   const [newCatName, setNewCatName] = useState('');
   const [newCatNumber, setNewCatNumber] = useState('');
@@ -1722,7 +1761,8 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
   function handleAddSectionClick() {
     const v = newSection.trim();
     if (!v) return;
-    onAddSection(v);
+    const addedOk = onAddSection(v, settingsRegion);
+    if (addedOk === false) return;
     setActiveSection(v);
     setNewSection('');
   }
@@ -1770,9 +1810,25 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
 
           <div className="field">
             <span>섹션 (예: 판타지, 시대별, 고전, 로맨틱 코미디) — 번호 1~50</span>
+            <div className="segmented">
+              {REGIONS.map(r => (
+                <button
+                  key={r}
+                  type="button"
+                  className={settingsRegion === r ? 'is-active' : ''}
+                  onClick={() => {
+                    setSettingsRegion(r);
+                    const first = sectionsOfRegion(settings, r)[0];
+                    setActiveSection(first ? first.name : '');
+                  }}
+                >
+                  {r}
+                </button>
+              ))}
+            </div>
             <div className="category-edit-list">
-              {settings.sections.length === 0 && <p className="hint-text-small">아직 섹션이 없어요.</p>}
-              {settings.sections.slice().sort((a, b) => a.number - b.number).map(s => (
+              {regionSections.length === 0 && <p className="hint-text-small">{settingsRegion}에는 아직 섹션이 없어요.</p>}
+              {regionSections.map(s => (
                 <div key={s.id} className={`category-edit-row${s.name === activeSection ? ' is-active-row' : ''}`}>
                   <button
                     type="button"
@@ -1800,13 +1856,24 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
                       if (activeSection === s.name) setActiveSection(v);
                     }}
                   />
+                  <select
+                    className="section-region-select"
+                    value={sectionRegion(s)}
+                    title="이 섹션이 속한 구분 (바꾸면 반대쪽으로 이동해요)"
+                    onChange={e => {
+                      onUpdateSection(s.id, { region: e.target.value });
+                      if (activeSection === s.name) setActiveSection('');
+                    }}
+                  >
+                    {REGIONS.map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
                   <button
                     type="button"
                     className="icon-btn"
                     onClick={() => {
                       onRemoveSection(s.id);
                       if (activeSection === s.name) {
-                        const next = settings.sections.find(x => x.id !== s.id);
+                        const next = regionSections.find(x => x.id !== s.id);
                         setActiveSection(next ? next.name : '');
                       }
                     }}
@@ -2491,6 +2558,12 @@ const APP_CSS = `
         .heart-filter-btn:hover { color: var(--accent); border-color: var(--accent-soft); }
         .heart-filter-btn.is-on { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); box-shadow: 0 0 9px color-mix(in srgb, var(--accent) 50%, transparent); }
         .shelf-nav__categories { padding-top: 14px; border-top: 1px dashed var(--line-dark); }
+        .shelf-region-tabs { display: flex; gap: 10px; }
+        .shelf-region { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line-dark); background: var(--bg-panel); color: var(--fg-soft); font-size: 15px; font-weight: 700; cursor: pointer; }
+        .shelf-region:hover { border-color: var(--gold); color: var(--fg); }
+        .shelf-region.is-active { background: var(--gold); border-color: var(--gold); color: var(--bg); }
+        .shelf-region__count { font-size: 11.5px; font-weight: 600; opacity: 0.75; }
+        .section-region-select { flex: none; width: 66px; font-size: 12px; padding: 4px 4px; }
         .poster-click { cursor: pointer; flex: none; }
         .poster-tile { text-align: left; }
         .detail-head { display: flex; gap: 14px; }
@@ -2556,21 +2629,41 @@ function ShelfSlotEmpty({ n, gallery, onClick }) {
 // 물리 매체(DVD/블루레이 등)를 실제 보관함처럼 섹션 → 카테고리 → 진열번호(최대 24)
 // 순으로 탐색하는 뷰. 빈 칸은 비어있는 상태 그대로 보여준다.
 // 섹션에 묶이지 않은 '개별 보관' 항목은 별도 탭으로 모아서 보여준다.
-function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, shelfCategoryId, setShelfCategoryId, onEdit, onOpenDetail, onFilter, onMoveToOwned, onAddSequel, onAddAtSlot }) {
+function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, shelfSection, setShelfSection, shelfCategoryId, setShelfCategoryId, onEdit, onOpenDetail, onFilter, onMoveToOwned, onAddSequel, onAddAtSlot }) {
   const physicalEntries = useMemo(
     () => movies.flatMap(m => getLocations(m).map(l => ({ m, l }))),
     [movies]
   );
-  const sections = useMemo(() => settings.sections.slice().sort((a, b) => a.number - b.number), [settings.sections]);
-  const isIndividual = shelfSection === SHELF_INDIVIDUAL;
+  const regionCounts = useMemo(() => {
+    const nameToRegion = new Map(settings.sections.map(sec => [sec.name, sectionRegion(sec)]));
+    const counts = {};
+    REGIONS.forEach(r => { counts[r] = 0; });
+    const seen = new Set();
+    const individualIds = new Set();
+    physicalEntries.forEach(({ m, l }) => {
+      if (l.individual) { individualIds.add(m.id); return; }
+      const r = nameToRegion.get(l.section);
+      if (!r) return;
+      const key = `${r}|${m.id}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      counts[r] += 1;
+    });
+    counts[SHELF_INDIVIDUAL] = individualIds.size;
+    return counts;
+  }, [physicalEntries, settings.sections]);
+  const isIndividual = shelfRegion === SHELF_INDIVIDUAL;
+  const sections = useMemo(() => (isIndividual ? [] : sectionsOfRegion(settings, shelfRegion)), [settings, shelfRegion, isIndividual]);
   const categoriesForSection = useMemo(() => {
     if (isIndividual || !shelfSection) return [];
     return settings.categories.filter(c => c.section === shelfSection).sort((a, b) => a.number - b.number);
   }, [settings.categories, shelfSection, isIndividual]);
 
   useEffect(() => {
-    if (!shelfSection) setShelfSection(sections.length > 0 ? sections[0].name : SHELF_INDIVIDUAL);
-  }, [sections, shelfSection]);
+    if (!isIndividual && !sections.some(sec => sec.name === shelfSection)) {
+      setShelfSection(sections.length > 0 ? sections[0].name : '');
+    }
+  }, [sections, shelfSection, isIndividual]);
 
   useEffect(() => {
     if (!isIndividual && shelfSection && categoriesForSection.length > 0 && !categoriesForSection.some(c => c.id === shelfCategoryId)) {
@@ -2602,7 +2695,20 @@ function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, 
 
   return (
     <div className="shelf-view">
-      <div className="shelf-nav__sections">
+      <div className="shelf-region-tabs">
+        {[...REGIONS, SHELF_INDIVIDUAL].map(r => (
+          <button
+            key={r}
+            type="button"
+            className={`shelf-region${shelfRegion === r ? ' is-active' : ''}`}
+            onClick={() => { setShelfRegion(r); setShelfSection(''); setShelfCategoryId(''); }}
+          >
+            {r === SHELF_INDIVIDUAL ? '개별 보관' : r}<span className="shelf-region__count">{regionCounts[r] || 0}편</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="shelf-nav__sections" style={isIndividual ? { display: 'none' } : undefined}>
         {sections.map(s => (
           <button
             key={s.id}
@@ -2613,13 +2719,6 @@ function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, 
             ({s.number}) {s.name}
           </button>
         ))}
-        <button
-          type="button"
-          className={`shelf-pill shelf-pill--individual${isIndividual ? ' is-active' : ''}`}
-          onClick={() => { setShelfSection(SHELF_INDIVIDUAL); setShelfCategoryId(''); }}
-        >
-          개별 보관
-        </button>
       </div>
 
       {!isIndividual && (
@@ -2674,7 +2773,7 @@ function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, 
           </div>
         )
       ) : (
-        <div className="empty-state"><p>카테고리를 선택해주세요.</p></div>
+        <div className="empty-state"><p>{sections.length === 0 ? `${shelfRegion}에는 아직 섹션이 없어요. 영화 등록 화면이나 설정에서 섹션을 추가해주세요.` : '카테고리를 선택해주세요.'}</p></div>
       )}
     </div>
   );
@@ -2695,6 +2794,7 @@ function MovieCollectionApp() {
   const [viewMode, setViewMode] = useState('card');
   const [shelfModeOn, setShelfModeOn] = useState(false);
   const [shelfSection, setShelfSection] = useState('');
+  const [shelfRegion, setShelfRegion] = useState(DEFAULT_REGION);
   const [shelfCategoryId, setShelfCategoryId] = useState('');
   const [expandedSeries, setExpandedSeries] = useState(() => new Set());
   const [page, setPage] = useState(1);
@@ -2888,12 +2988,20 @@ function MovieCollectionApp() {
 
   function handleChangeTheme(themeId) { persistSettings({ ...settings, themeId }); }
 
-  function handleAddSection(name) {
-    if (settings.sections.some(s => s.name === name)) return;
-    const used = new Set(settings.sections.map(s => s.number));
+  function handleAddSection(name, region = DEFAULT_REGION) {
+    const dup = settings.sections.find(s => s.name === name);
+    if (dup) {
+      if (sectionRegion(dup) !== region) {
+        window.alert(`「${name}」 섹션은 이미 ${sectionRegion(dup)}에 있어요. 섹션 이름은 외화/한국에 걸쳐 겹치지 않아야 해서, 다른 이름을 사용해주세요.`);
+        return false;
+      }
+      return true;
+    }
+    const used = new Set(settings.sections.filter(s => sectionRegion(s) === region).map(s => s.number));
     let suggested = 1;
     while (used.has(suggested) && suggested <= 50) suggested++;
-    persistSettings({ ...settings, sections: [...settings.sections, { id: uid(), number: suggested, name }] });
+    persistSettings({ ...settings, sections: [...settings.sections, { id: uid(), number: suggested, name, region }] });
+    return true;
   }
 
   function handleUpdateSection(id, patch) {
@@ -3349,6 +3457,8 @@ function MovieCollectionApp() {
             movies={movies}
             settings={settings}
             viewMode={viewMode}
+            shelfRegion={shelfRegion}
+            setShelfRegion={setShelfRegion}
             shelfSection={shelfSection}
             setShelfSection={setShelfSection}
             shelfCategoryId={shelfCategoryId}
