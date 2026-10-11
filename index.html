@@ -1080,14 +1080,14 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   }, [categoriesForSection]);
 
   const takenSlots = useMemo(() => {
-    const set = new Set();
+    const map = new Map();
     movies.forEach(m => {
       if (m.id === initial?.id) return;
       getLocations(m).forEach(l => {
-        if (l.section === locSection && l.categoryName === locCategoryName) set.add(Number(l.itemNumber));
+        if (l.section === locSection && l.categoryName === locCategoryName) map.set(Number(l.itemNumber), m.titleKr || '제목 없음');
       });
     });
-    return set;
+    return map;
   }, [movies, locSection, locCategoryName, initial]);
 
   const suggestedItemNumber = useMemo(() => {
@@ -1112,7 +1112,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   }, [discPlan, discStart]);
   const slotProblems = plannedSlots.map((n, i) =>
     n < 1 || n > 24 ? '1~24 범위 밖'
-    : takenSlots.has(n) ? '이미 사용 중'
+    : takenSlots.has(n) ? `이미 사용 중: ${takenSlots.get(n)}`
     : plannedSlots.indexOf(n) !== i ? '디스크 간 번호 중복' : '');
 
   function togglePlanContent(i, key) {
@@ -1193,8 +1193,14 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
       onAddCustomFormat(custom);
     }
     const sectionMode = locMode === 'section' && locSection && locCategoryName;
-    if (hasPhysical && sectionMode && slotProblems.some(Boolean)) {
-      if (!window.confirm('겹치거나 1~24번을 벗어난 칸이 있어요. 그래도 저장할까요?')) return;
+    if (hasPhysical && sectionMode) {
+      const problemLines = slotProblems
+        .map((p, i) => p ? `Disc ${i + 1} (${plannedSlots[i]}번): ${p}` : '')
+        .filter(Boolean);
+      if (problemLines.length > 0) {
+        const detail = `섹션: ${locSection} / 카테고리: ${locCategoryName} (${locCategoryNumber})`;
+        if (!window.confirm(`⚠️ 칸 번호 확인\n${detail}\n\n${problemLines.join('\n')}\n\n그래도 저장할까요?`)) return;
+      }
     }
     const finalLocations = !hasPhysical ? []
       : locMode === 'individual' ? [{ individual: true, disc: 1, contents: ['main'], note: '' }]
