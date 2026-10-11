@@ -609,6 +609,7 @@ const Loader2 = makeIcon(<path d="M21 12a9 9 0 1 1-6.219-8.56" />);
 const RotateCcw = makeIcon(<><polyline points="1 4 1 10 7 10" /><path d="M3.5 15a9 9 0 1 0 .5-8.5L1 10" /></>);
 const PackageCheck = makeIcon(<><path d="M16 16l2 2 4-4" /><path d="M21 10V7a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 7v10a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0" /><path d="M3.29 7L12 12l8.71-5" /><line x1="12" y1="22" x2="12" y2="12" /></>);
 const Link2 = makeIcon(<><path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3" /><path d="M9 17H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3" /><line x1="8" y1="12" x2="16" y2="12" /></>);
+const DiscIcon = makeIcon(<><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="3" /></>);
 const PlusCircle = makeIcon(<><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" /></>);
 
 // ================= 아래부터 앱 코드 =================
@@ -620,12 +621,13 @@ const UNCLASSIFIED_FORMAT = '미분류';
 
 // 디스크 연속 등록: locations 배열의 항목 하나 = 디스크 한 장 = 진열 칸 하나
 const DISC_CONTENT_TYPES = [
-  { key: 'main', label: '본편' },
-  { key: 'special', label: 'Special Features' },
-  { key: 'ost', label: 'OST' },
-  { key: 'music', label: '음악' },
+  { key: 'main', label: '본편', short: '본편' },
+  { key: 'special', label: 'Special Features', short: '스페셜' },
+  { key: 'ost', label: 'OST', short: 'OST' },
+  { key: 'music', label: '음악', short: '음악' },
 ];
 const contentLabel = k => (DISC_CONTENT_TYPES.find(t => t.key === k) || {}).label || k;
+const contentShort = k => (DISC_CONTENT_TYPES.find(t => t.key === k) || {}).short || k;
 const hasLoc = l => !!l && (!!l.individual || !!l.categoryName);
 function getLocations(m) {
   if (Array.isArray(m.locations) && m.locations.length) return m.locations.filter(hasLoc);
@@ -636,6 +638,25 @@ function discTag(l, total) {
   if (!c.length) return '';
   if (total <= 1 && c.length === 1 && c[0] === 'main') return '';
   return `Disc ${l.disc || 1} · ${c.map(contentLabel).join('·')}`;
+}
+// 제목 옆 디스크 배지: 디스크가 여럿이거나 본편 외 내용이 있을 때만 표시
+function discBadgeInfo(l, total) {
+  const c = l.contents || [];
+  if (!c.length) return null;
+  if (total <= 1 && c.length === 1 && c[0] === 'main') return null;
+  return {
+    text: `Disc ${l.disc || 1} · ${c.map(contentShort).join('·')}`,
+    title: `Disc ${l.disc || 1} · ${c.map(contentLabel).join(', ')}${l.note ? ` (${l.note})` : ''}`,
+  };
+}
+function DiscBadge({ loc, total, tile }) {
+  const info = discBadgeInfo(loc, total);
+  if (!info) return null;
+  return (
+    <span className={`disc-badge${tile ? ' disc-badge--tile' : ''}`} title={info.title}>
+      <DiscIcon size={tile ? 10 : 11} />{info.text}
+    </span>
+  );
 }
 
 const THEMES = {
@@ -1848,17 +1869,17 @@ function PosterMovieTile({ movie, onEdit, focusLoc }) {
       type="button"
       className={`poster-tile${movie.status === 'wishlist' ? ' poster-tile--unowned' : ''}`}
       onClick={() => onEdit(movie)}
-      title={focusLoc && discTag(focusLoc, getLocations(movie).length) ? `${movie.titleKr} · ${discTag(focusLoc, getLocations(movie).length)}` : movie.titleKr}
+      title={movie.titleKr}
     >
       <div
         className="poster-tile__frame"
         style={sColor ? { borderTopColor: sColor, borderTopStyle: movie.seriesUnofficial ? 'dashed' : movie.seriesRemake ? 'dotted' : 'solid' } : undefined}
       >
         <Poster url={movie.posterUrl} size="gallery" />
+        {focusLoc && <DiscBadge loc={focusLoc} total={getLocations(movie).length} tile />}
         {movie.status === 'wishlist' && <span className="poster-tile__wishlist-tag">미보유</span>}
         <div className="poster-tile__overlay">
           <span className="poster-tile__title">{movie.titleKr}</span>
-          {focusLoc && discTag(focusLoc, getLocations(movie).length) && <span className="poster-tile__title">{discTag(focusLoc, getLocations(movie).length)}</span>}
           <StarRating value={movie.rating} readOnly size={10} />
         </div>
       </div>
@@ -1945,7 +1966,13 @@ function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel, focusL
       <div className="card__body">
         <div className="card__top">
           <div className="card__title">
-            <span className="card__title-kr">{movie.titleKr}</span>
+            <span className="card__title-row">
+              <span className="card__title-kr">{movie.titleKr}</span>
+              {(() => {
+                const all = getLocations(movie);
+                return (focusLoc ? [focusLoc] : all).map((l, i) => <DiscBadge key={i} loc={l} total={all.length} />);
+              })()}
+            </span>
             {movie.titleOriginal && <span className="card__title-orig">{movie.titleOriginal}</span>}
           </div>
           <button type="button" className="icon-btn icon-btn--ghost" onClick={() => onEdit(movie)}>
@@ -2038,18 +2065,14 @@ function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel, focusL
           {(() => {
             const all = getLocations(movie);
             const locs = focusLoc ? [focusLoc] : all;
-            return locs.map((l, i) => {
-              const tag = discTag(l, all.length);
-              return (
-                <span key={i} className="location-tag">
-                  <MapPin size={12} />
-                  {l.individual
-                    ? '개별 보관'
-                    : `${l.section} · (${l.categoryNumber}) ${l.categoryName}${l.itemNumber ? ` · ${l.itemNumber}번` : ''}`}
-                  {tag && ` · ${tag}`}
-                </span>
-              );
-            });
+            return locs.map((l, i) => (
+              <span key={i} className="location-tag">
+                <MapPin size={12} />
+                {l.individual
+                  ? '개별 보관'
+                  : `${l.section} · (${l.categoryNumber}) ${l.categoryName}${l.itemNumber ? ` · ${l.itemNumber}번` : ''}`}
+              </span>
+            ));
           })()}
           {movie.status === 'wishlist' && (
             <button type="button" className="move-owned-btn" onClick={() => onMoveToOwned(movie)}>
@@ -2309,6 +2332,9 @@ const APP_CSS = `
         .category-edit-row input:not([type=number]) { flex: 1; }
         .section-select-btn { flex: none; width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line); background: #fff; color: var(--accent); font-size: 12px; display: flex; align-items: center; justify-content: center; }
         .disc-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; border-top: 1px dashed var(--line); }
+        .card__title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+        .disc-badge { display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 600; line-height: 1; padding: 3px 7px; border-radius: 999px; white-space: nowrap; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); }
+        .disc-badge--tile { position: absolute; top: 6px; left: 6px; z-index: 1; color: #fff; background: rgba(0,0,0,0.48); border-color: rgba(255,255,255,0.35); font-size: 10px; padding: 2px 6px; }
 `;
 
 function SaveStatus({ saving }) {
