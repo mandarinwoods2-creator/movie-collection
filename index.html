@@ -610,6 +610,7 @@ const RotateCcw = makeIcon(<><polyline points="1 4 1 10 7 10" /><path d="M3.5 15
 const PackageCheck = makeIcon(<><path d="M16 16l2 2 4-4" /><path d="M21 10V7a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 7v10a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0" /><path d="M3.29 7L12 12l8.71-5" /><line x1="12" y1="22" x2="12" y2="12" /></>);
 const Link2 = makeIcon(<><path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3" /><path d="M9 17H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3" /><line x1="8" y1="12" x2="16" y2="12" /></>);
 const DiscIcon = makeIcon(<><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="3" /></>);
+const HeartIcon = makeIcon(<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />);
 const PlusCircle = makeIcon(<><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" /></>);
 
 // ================= 아래부터 앱 코드 =================
@@ -618,6 +619,9 @@ const PlusCircle = makeIcon(<><circle cx="12" cy="12" r="10" /><line x1="12" y1=
 const DEFAULT_FORMATS = ['DVD', '블루레이', '왓챠', 'Apple TV', '쿠팡플레이', 'Youtube', '씨네폭스'];
 const PHYSICAL_FORMATS = ['DVD', '블루레이'];
 const UNCLASSIFIED_FORMAT = '미분류';
+
+// 컴포넌트가 앱 상태 변경 함수를 부르기 위한 연결 지점 (앱 컴포넌트가 매 렌더마다 채운다)
+const appActions = { toggleFavorite: null };
 
 // 디스크 연속 등록: locations 배열의 항목 하나 = 디스크 한 장 = 진열 칸 하나
 const DISC_CONTENT_TYPES = [
@@ -633,13 +637,6 @@ function getLocations(m) {
   if (Array.isArray(m.locations) && m.locations.length) return m.locations.filter(hasLoc);
   return hasLoc(m.physicalLocation) ? [{ ...m.physicalLocation, disc: 1, contents: ['main'], note: '' }] : [];
 }
-function discTag(l, total) {
-  const c = l.contents || [];
-  if (!c.length) return '';
-  if (total <= 1 && c.length === 1 && c[0] === 'main') return '';
-  return `Disc ${l.disc || 1} · ${c.map(contentLabel).join('·')}`;
-}
-// 제목 옆 디스크 배지: 디스크가 여럿이거나 본편 외 내용이 있을 때만 표시
 function discBadgeInfo(l, total) {
   const c = l.contents || [];
   if (!c.length) return null;
@@ -656,6 +653,27 @@ function DiscBadge({ loc, total, tile }) {
     <span className={`disc-badge${tile ? ' disc-badge--tile' : ''}`} title={info.title}>
       <DiscIcon size={tile ? 10 : 11} />{info.text}
     </span>
+  );
+}
+function locationText(l) {
+  return l.individual
+    ? '개별 보관'
+    : `${l.section} · (${l.categoryNumber}) ${l.categoryName}${l.itemNumber ? ` · ${l.itemNumber}번` : ''}`;
+}
+
+// 하트(즐겨찾기) 버튼: 카드/포스터에 마우스를 올리면 나타나고, 눌러 둔 하트는 항상 보인다.
+function HeartButton({ movie, className = '', size = 15 }) {
+  const on = !!movie.favorite;
+  return (
+    <button
+      type="button"
+      className={`heart-btn${on ? ' is-on' : ''}${className ? ' ' + className : ''}`}
+      title={on ? '하트 해제' : '하트'}
+      aria-pressed={on}
+      onClick={e => { e.stopPropagation(); if (appActions.toggleFavorite) appActions.toggleFavorite(movie); }}
+    >
+      <HeartIcon size={size} style={on ? { fill: 'currentColor' } : undefined} />
+    </button>
   );
 }
 
@@ -1209,6 +1227,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
       formats,
       physicalLocation,
       locations: finalLocations,
+      favorite: !!initial?.favorite,
       posterUrl,
       rating,
       seriesId,
@@ -1865,11 +1884,13 @@ function SeriesHeaderBar({ entry, onToggle }) {
 function PosterMovieTile({ movie, onEdit, focusLoc }) {
   const sColor = movie.seriesId ? seriesColor(movie.seriesId) : null;
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
+      onKeyDown={e => { if (e.key === 'Enter') onEdit(movie); }}
       className={`poster-tile${movie.status === 'wishlist' ? ' poster-tile--unowned' : ''}`}
       onClick={() => onEdit(movie)}
-      title={movie.titleKr}
+      title={focusLoc && discBadgeInfo(focusLoc, getLocations(movie).length) ? `${movie.titleKr} · ${discBadgeInfo(focusLoc, getLocations(movie).length).title}` : movie.titleKr}
     >
       <div
         className="poster-tile__frame"
@@ -1877,13 +1898,109 @@ function PosterMovieTile({ movie, onEdit, focusLoc }) {
       >
         <Poster url={movie.posterUrl} size="gallery" />
         {focusLoc && <DiscBadge loc={focusLoc} total={getLocations(movie).length} tile />}
+        <HeartButton movie={movie} className="heart-btn--tile" />
         {movie.status === 'wishlist' && <span className="poster-tile__wishlist-tag">미보유</span>}
         <div className="poster-tile__overlay">
           <span className="poster-tile__title">{movie.titleKr}</span>
           <StarRating value={movie.rating} readOnly size={10} />
         </div>
       </div>
-    </button>
+    </div>
+  );
+}
+
+function MovieDetailModal({ movie, onClose, onEdit, onFilter }) {
+  const locs = getLocations(movie);
+  const countries = movie.countries || (movie.country ? [movie.country] : []);
+  const genres = movie.genres || (movie.genre ? [movie.genre] : []);
+  const metaLine = [movie.year, movie.runtime ? `${movie.runtime}분` : '', movie.ageRating, countries.join(', '), genres.join(', ')].filter(Boolean).join(' · ');
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <div className="drawer" onClick={e => e.stopPropagation()}>
+        <div className="drawer__head">
+          <h2>영화 정보</h2>
+          <button type="button" className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="drawer__body">
+          <div className="detail-head">
+            <Poster url={movie.posterUrl} size="lg" />
+            <div className="detail-title">
+              <h3>{movie.titleKr}</h3>
+              {movie.titleOriginal && <span className="detail-sub">{movie.titleOriginal}</span>}
+              {metaLine && <span className="detail-sub">{metaLine}</span>}
+              <span><StarRating value={movie.rating} readOnly size={15} /></span>
+              <span><HeartButton movie={movie} size={18} /></span>
+            </div>
+          </div>
+
+          {movie.seriesName && (
+            <div className="detail-section">
+              <span className="detail-label">시리즈</span>
+              <span className="detail-text">{movie.seriesName}{movie.seriesOrder !== '' && movie.seriesOrder != null ? ` #${movie.seriesOrder}` : ''}{movie.seriesUnofficial ? ' (비공식)' : ''}{movie.seriesRemake ? ' (리메이크)' : ''}</span>
+            </div>
+          )}
+
+          {movie.director && (
+            <div className="detail-section">
+              <span className="detail-label">감독</span>
+              <span className="detail-text">{movie.director}</span>
+            </div>
+          )}
+          {movie.actors && movie.actors.length > 0 && (
+            <div className="detail-section">
+              <span className="detail-label">출연</span>
+              <span className="detail-text">{movie.actors.join(', ')}</span>
+            </div>
+          )}
+          {movie.synopsis && (
+            <div className="detail-section">
+              <span className="detail-label">줄거리</span>
+              <span className="detail-text">{movie.synopsis}</span>
+            </div>
+          )}
+
+          {(movie.formats && movie.formats.length > 0) && (
+            <div className="detail-section">
+              <span className="detail-label">매체</span>
+              <div className="detail-tags">{movie.formats.map(f => <span key={f} className="format-tag">{f}</span>)}</div>
+            </div>
+          )}
+          {locs.length > 0 && (
+            <div className="detail-section">
+              <span className="detail-label">보관 위치</span>
+              {locs.map((l, i) => (
+                <div key={i} className="detail-loc">
+                  <span className="location-tag"><MapPin size={12} />{locationText(l)}</span>
+                  <DiscBadge loc={l} total={locs.length} />
+                  {l.note && <span className="detail-sub">{l.note}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {movie.hashtags && movie.hashtags.length > 0 && (
+            <div className="detail-section">
+              <span className="detail-label">비고 해시태그</span>
+              <div className="detail-tags">
+                {movie.hashtags.map(t => <button type="button" key={t} className="tag-link" onClick={() => { onClose(); onFilter && onFilter('tag', t); }}>#{t}</button>)}
+              </div>
+            </div>
+          )}
+          {movie.notes && (
+            <div className="detail-section">
+              <span className="detail-label">메모</span>
+              <span className="detail-text">{movie.notes}</span>
+            </div>
+          )}
+        </div>
+        <div className="drawer__foot">
+          <div className="drawer__foot-actions">
+            <button type="button" className="btn btn--ghost" onClick={onClose}>닫기</button>
+            <button type="button" className="btn btn--primary" onClick={() => onEdit(movie)}><Pencil size={14} /> 편집</button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1953,7 +2070,7 @@ function SeriesExpandedCardBlock({ entry, onToggle, onEdit, onFilter, onMoveToOw
   );
 }
 
-function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel, focusLoc }) {
+function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel, focusLoc, onOpenDetail }) {
   const [expanded, setExpanded] = useState(false);
   const sColor = movie.seriesId ? seriesColor(movie.seriesId) : null;
   const hasMoreInfo = !!(movie.synopsis || movie.notes);
@@ -1962,7 +2079,13 @@ function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel, focusL
       className={`card${movie.status === 'wishlist' ? ' card--unowned' : ''}`}
       style={sColor ? { borderTop: `3px ${movie.seriesUnofficial ? 'dashed' : movie.seriesRemake ? 'dotted' : 'solid'} ${sColor}` } : undefined}
     >
-      <Poster url={movie.posterUrl} size="card" />
+      {onOpenDetail ? (
+        <div className="poster-click" role="button" tabIndex={0} onClick={() => onOpenDetail(movie)} onKeyDown={e => { if (e.key === 'Enter') onOpenDetail(movie); }}>
+          <Poster url={movie.posterUrl} size="card" />
+        </div>
+      ) : (
+        <Poster url={movie.posterUrl} size="card" />
+      )}
       <div className="card__body">
         <div className="card__top">
           <div className="card__title">
@@ -1975,9 +2098,12 @@ function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel, focusL
             </span>
             {movie.titleOriginal && <span className="card__title-orig">{movie.titleOriginal}</span>}
           </div>
-          <button type="button" className="icon-btn icon-btn--ghost" onClick={() => onEdit(movie)}>
-            <Pencil size={15} />
-          </button>
+          <span className="card__actions">
+            <HeartButton movie={movie} />
+            <button type="button" className="icon-btn icon-btn--ghost" onClick={() => onEdit(movie)}>
+              <Pencil size={15} />
+            </button>
+          </span>
         </div>
 
         <StarRating value={movie.rating} readOnly size={14} />
@@ -2068,9 +2194,7 @@ function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel, focusL
             return locs.map((l, i) => (
               <span key={i} className="location-tag">
                 <MapPin size={12} />
-                {l.individual
-                  ? '개별 보관'
-                  : `${l.section} · (${l.categoryNumber}) ${l.categoryName}${l.itemNumber ? ` · ${l.itemNumber}번` : ''}`}
+                {locationText(l)}
               </span>
             ));
           })()}
@@ -2335,6 +2459,24 @@ const APP_CSS = `
         .card__title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
         .disc-badge { display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 600; line-height: 1; padding: 3px 7px; border-radius: 999px; white-space: nowrap; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); }
         .disc-badge--tile { position: absolute; top: 6px; left: 6px; z-index: 1; color: #fff; background: rgba(0,0,0,0.48); border-color: rgba(255,255,255,0.35); font-size: 10px; padding: 2px 6px; }
+        .card__actions { display: flex; align-items: center; gap: 2px; flex: none; }
+        .heart-btn { display: inline-flex; align-items: center; justify-content: center; padding: 4px; border: none; background: none; cursor: pointer; color: var(--accent); opacity: 0; transition: opacity 0.12s, transform 0.12s; }
+        .heart-btn:hover { transform: scale(1.12); }
+        .card:hover .heart-btn, .poster-tile:hover .heart-btn, .detail-head .heart-btn, .heart-btn:focus-visible, .heart-btn.is-on { opacity: 1; }
+        .heart-btn--tile { position: absolute; right: 4px; bottom: 4px; z-index: 2; color: #fff; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6)); }
+        .heart-btn--tile.is-on { color: var(--accent-soft); }
+        @media (hover: none) { .heart-btn:not(.is-on) { opacity: 0.5; } }
+        .poster-click { cursor: pointer; flex: none; }
+        .poster-tile { text-align: left; }
+        .detail-head { display: flex; gap: 14px; }
+        .detail-title { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+        .detail-title h3 { margin: 0; font-family: Georgia, "Apple SD Gothic Neo", serif; font-size: 20px; color: var(--ink); line-height: 1.3; }
+        .detail-sub { font-size: 12.5px; color: var(--ink-soft); }
+        .detail-section { display: flex; flex-direction: column; gap: 6px; }
+        .detail-label { font-size: 11.5px; font-weight: 700; color: var(--ink-soft); letter-spacing: 0.02em; }
+        .detail-text { font-size: 13.5px; color: var(--ink); line-height: 1.6; white-space: pre-wrap; }
+        .detail-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+        .detail-loc { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink); }
 `;
 
 function SaveStatus({ saving }) {
@@ -2389,7 +2531,7 @@ function ShelfSlotEmpty({ n, gallery, onClick }) {
 // 물리 매체(DVD/블루레이 등)를 실제 보관함처럼 섹션 → 카테고리 → 진열번호(최대 24)
 // 순으로 탐색하는 뷰. 빈 칸은 비어있는 상태 그대로 보여준다.
 // 섹션에 묶이지 않은 '개별 보관' 항목은 별도 탭으로 모아서 보여준다.
-function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, shelfCategoryId, setShelfCategoryId, onEdit, onFilter, onMoveToOwned, onAddSequel, onAddAtSlot }) {
+function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, shelfCategoryId, setShelfCategoryId, onEdit, onOpenDetail, onFilter, onMoveToOwned, onAddSequel, onAddAtSlot }) {
   const physicalEntries = useMemo(
     () => movies.flatMap(m => getLocations(m).map(l => ({ m, l }))),
     [movies]
@@ -2479,12 +2621,12 @@ function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, 
           <div className="empty-state"><p>개별 보관으로 등록된 영화가 아직 없어요.</p></div>
         ) : isGallery ? (
           <div className="poster-gallery">
-            {individualMovies.map(m => <PosterMovieTile key={m.id} movie={m} onEdit={onEdit} />)}
+            {individualMovies.map(m => <PosterMovieTile key={m.id} movie={m} onEdit={onOpenDetail || onEdit} />)}
           </div>
         ) : (
           <div className="grid">
             {individualMovies.map(m => (
-              <MovieCard key={m.id} movie={m} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />
+              <MovieCard key={m.id} movie={m} onOpenDetail={onOpenDetail} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />
             ))}
           </div>
         )
@@ -2493,7 +2635,7 @@ function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, 
           <div className="poster-gallery">
             {slotNumbers.map(n => (
               slotMovies[n]
-                ? <PosterMovieTile key={n} movie={slotMovies[n].m} focusLoc={slotMovies[n].loc} onEdit={onEdit} />
+                ? <PosterMovieTile key={n} movie={slotMovies[n].m} focusLoc={slotMovies[n].loc} onEdit={onOpenDetail || onEdit} />
                 : <ShelfSlotEmpty key={n} n={n} gallery onClick={() => onAddAtSlot({ section: shelfSection, categoryName: selectedCategory.name, categoryNumber: selectedCategory.number, itemNumber: n })} />
             ))}
           </div>
@@ -2501,7 +2643,7 @@ function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, 
           <div className="grid">
             {slotNumbers.map(n => (
               slotMovies[n]
-                ? <MovieCard key={n} movie={slotMovies[n].m} focusLoc={slotMovies[n].loc} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />
+                ? <MovieCard key={n} movie={slotMovies[n].m} focusLoc={slotMovies[n].loc} onOpenDetail={onOpenDetail} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />
                 : <ShelfSlotEmpty key={n} n={n} onClick={() => onAddAtSlot({ section: shelfSection, categoryName: selectedCategory.name, categoryNumber: selectedCategory.number, itemNumber: n })} />
             ))}
           </div>
@@ -2538,6 +2680,9 @@ function MovieCollectionApp() {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkLocationSeed, setBulkLocationSeed] = useState(null);
   const [slotAddContext, setSlotAddContext] = useState(null);
+  const [detailId, setDetailId] = useState(null);
+  const detailMovie = detailId ? movies.find(m => m.id === detailId) || null : null;
+  appActions.toggleFavorite = handleToggleFavorite;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState('');
   const [savingCount, setSavingCount] = useState(0);
@@ -2805,6 +2950,28 @@ function MovieCollectionApp() {
     } catch (e) {
       console.error(e);
       window.alert('⚠️ 삭제를 완료하지 못했어요. 화면의 영화 정보는 그대로 유지했습니다.');
+    } finally {
+      endSaving();
+    }
+  }
+
+  async function handleToggleFavorite(movie) {
+    if (loadError) {
+      window.alert('⚠️ 영화 전체 목록을 정상적으로 불러온 뒤 변경해 주세요.');
+      return;
+    }
+    const current = movies.find(m => m.id === movie.id) || movie;
+    const updated = { ...current, favorite: !current.favorite };
+    beginSaving();
+    try {
+      await window.storage.set(`movie:${updated.id}`, JSON.stringify(updated), false);
+      const nextMovies = movies.map(m => m.id === updated.id ? updated : m);
+      setMovies(nextMovies);
+      saveLocalCache({ movies: nextMovies, customFormats, settings });
+      makeBackupAfterSave(nextMovies, '하트 변경');
+    } catch (e) {
+      console.error(e);
+      window.alert('⚠️ 하트 상태를 저장하지 못했어요.');
     } finally {
       endSaving();
     }
@@ -3138,6 +3305,7 @@ function MovieCollectionApp() {
             shelfCategoryId={shelfCategoryId}
             setShelfCategoryId={setShelfCategoryId}
             onEdit={mv => { setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }}
+            onOpenDetail={mv => setDetailId(mv.id)}
             onFilter={openFilter}
             onMoveToOwned={handleMoveToOwned}
             onAddSequel={handleAddSequel}
@@ -3193,6 +3361,15 @@ function MovieCollectionApp() {
           </div>
         )}
       </main>
+
+      {detailMovie && (
+        <MovieDetailModal
+          movie={detailMovie}
+          onClose={() => setDetailId(null)}
+          onFilter={openFilter}
+          onEdit={mv => { setDetailId(null); setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }}
+        />
+      )}
 
       {formOpen && (
         <MovieForm
