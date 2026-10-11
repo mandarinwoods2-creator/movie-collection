@@ -1841,14 +1841,14 @@ function SeriesHeaderBar({ entry, onToggle }) {
 
 // 포스터만 촘촘히 진열한 '진열장' 뷰. 시리즈는 항상 이어서 배치되고,
 // 접혀있으면 묶음 타일 하나로, 펼쳐져 있으면 구분줄 + 개별 포스터로 보인다.
-function PosterMovieTile({ movie, onEdit }) {
+function PosterMovieTile({ movie, onEdit, focusLoc }) {
   const sColor = movie.seriesId ? seriesColor(movie.seriesId) : null;
   return (
     <button
       type="button"
       className={`poster-tile${movie.status === 'wishlist' ? ' poster-tile--unowned' : ''}`}
       onClick={() => onEdit(movie)}
-      title={movie.titleKr}
+      title={focusLoc && discTag(focusLoc, getLocations(movie).length) ? `${movie.titleKr} · ${discTag(focusLoc, getLocations(movie).length)}` : movie.titleKr}
     >
       <div
         className="poster-tile__frame"
@@ -1858,6 +1858,7 @@ function PosterMovieTile({ movie, onEdit }) {
         {movie.status === 'wishlist' && <span className="poster-tile__wishlist-tag">미보유</span>}
         <div className="poster-tile__overlay">
           <span className="poster-tile__title">{movie.titleKr}</span>
+          {focusLoc && discTag(focusLoc, getLocations(movie).length) && <span className="poster-tile__title">{discTag(focusLoc, getLocations(movie).length)}</span>}
           <StarRating value={movie.rating} readOnly size={10} />
         </div>
       </div>
@@ -1931,7 +1932,7 @@ function SeriesExpandedCardBlock({ entry, onToggle, onEdit, onFilter, onMoveToOw
   );
 }
 
-function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
+function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel, focusLoc }) {
   const [expanded, setExpanded] = useState(false);
   const sColor = movie.seriesId ? seriesColor(movie.seriesId) : null;
   const hasMoreInfo = !!(movie.synopsis || movie.notes);
@@ -2035,9 +2036,10 @@ function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel }) {
           )}
           {movie.formats?.map(f => <span key={f} className="format-tag">{f}</span>)}
           {(() => {
-            const locs = getLocations(movie);
+            const all = getLocations(movie);
+            const locs = focusLoc ? [focusLoc] : all;
             return locs.map((l, i) => {
-              const tag = discTag(l, locs.length);
+              const tag = discTag(l, all.length);
               return (
                 <span key={i} className="location-tag">
                   <MapPin size={12} />
@@ -2396,7 +2398,7 @@ function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, 
       if (loc.individual) return;
       if (loc.section === shelfSection && loc.categoryName === selectedCategory.name && String(loc.categoryNumber) === String(selectedCategory.number)) {
         const n = Number(loc.itemNumber);
-        if (n >= 1 && n <= 24) map[n] = m;
+        if (n >= 1 && n <= 24) map[n] = { m, loc };
       }
     });
     return map;
@@ -2465,7 +2467,7 @@ function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, 
           <div className="poster-gallery">
             {slotNumbers.map(n => (
               slotMovies[n]
-                ? <PosterMovieTile key={n} movie={slotMovies[n]} onEdit={onEdit} />
+                ? <PosterMovieTile key={n} movie={slotMovies[n].m} focusLoc={slotMovies[n].loc} onEdit={onEdit} />
                 : <ShelfSlotEmpty key={n} n={n} gallery onClick={() => onAddAtSlot({ section: shelfSection, categoryName: selectedCategory.name, categoryNumber: selectedCategory.number, itemNumber: n })} />
             ))}
           </div>
@@ -2473,7 +2475,7 @@ function ShelfView({ movies, settings, viewMode, shelfSection, setShelfSection, 
           <div className="grid">
             {slotNumbers.map(n => (
               slotMovies[n]
-                ? <MovieCard key={n} movie={slotMovies[n]} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />
+                ? <MovieCard key={n} movie={slotMovies[n].m} focusLoc={slotMovies[n].loc} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />
                 : <ShelfSlotEmpty key={n} n={n} onClick={() => onAddAtSlot({ section: shelfSection, categoryName: selectedCategory.name, categoryNumber: selectedCategory.number, itemNumber: n })} />
             ))}
           </div>
