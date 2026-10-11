@@ -1079,16 +1079,35 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
     return '';
   }, [categoriesForSection]);
 
+  // 진열장 화면과 같은 기준(섹션 + 카테고리 이름 + 카테고리 번호)으로 같은 칸인지 비교한다.
+  const sameShelf = l =>
+    l.section === locSection &&
+    l.categoryName === locCategoryName &&
+    String(l.categoryNumber ?? '') === String(locCategoryNumber ?? '');
+
   const takenSlots = useMemo(() => {
     const map = new Map();
     movies.forEach(m => {
       if (m.id === initial?.id) return;
       getLocations(m).forEach(l => {
-        if (l.section === locSection && l.categoryName === locCategoryName) map.set(Number(l.itemNumber), m.titleKr || '제목 없음');
+        if (sameShelf(l)) map.set(Number(l.itemNumber), m.titleKr || '제목 없음');
       });
     });
     return map;
-  }, [movies, locSection, locCategoryName, initial]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [movies, locSection, locCategoryName, locCategoryNumber, initial]);
+
+  // 이 영화가 원래부터 쓰고 있던 칸은 '새로 차지하는 칸'이 아니므로 사용 중 경고에서 제외한다.
+  const ownSlots = useMemo(() => {
+    const set = new Set();
+    if (initial) {
+      getLocations(initial).forEach(l => {
+        if (sameShelf(l)) set.add(Number(l.itemNumber));
+      });
+    }
+    return set;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial, locSection, locCategoryName, locCategoryNumber]);
 
   const suggestedItemNumber = useMemo(() => {
     if (!locSection || !locCategoryName) return null;
@@ -1112,7 +1131,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   }, [discPlan, discStart]);
   const slotProblems = plannedSlots.map((n, i) =>
     n < 1 || n > 24 ? '1~24 범위 밖'
-    : takenSlots.has(n) ? `이미 사용 중: ${takenSlots.get(n)}`
+    : (takenSlots.has(n) && !ownSlots.has(n)) ? `이미 사용 중: ${takenSlots.get(n)}`
     : plannedSlots.indexOf(n) !== i ? '디스크 간 번호 중복' : '');
 
   function togglePlanContent(i, key) {
@@ -1198,7 +1217,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
         .map((p, i) => p ? `Disc ${i + 1} (${plannedSlots[i]}번): ${p}` : '')
         .filter(Boolean);
       if (problemLines.length > 0) {
-        const detail = `섹션: ${locSection} / 카테고리: ${locCategoryName} (${locCategoryNumber})`;
+        const detail = `섹션: ${locSection} / 카테고리: (${locCategoryNumber}) ${locCategoryName}`;
         if (!window.confirm(`⚠️ 칸 번호 확인\n${detail}\n\n${problemLines.join('\n')}\n\n그래도 저장할까요?`)) return;
       }
     }
