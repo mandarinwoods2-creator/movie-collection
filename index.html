@@ -2460,6 +2460,12 @@ const APP_CSS = `
         .heart-btn--tile { position: absolute; right: 4px; bottom: 4px; z-index: 2; color: #fff; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6)); }
         .heart-btn--tile.is-on { color: var(--accent-soft); }
         @media (hover: none) { .heart-btn:not(.is-on) { opacity: 0.5; } }
+        .status-row { display: flex; align-items: center; gap: 8px; }
+        .status-row .segmented { flex: 1; min-width: 0; }
+        .heart-filter-btn { flex: none; width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; border: 1px solid var(--line); background: transparent; color: var(--ink-soft); cursor: pointer; transition: color 0.15s, background 0.15s, box-shadow 0.15s, border-color 0.15s; }
+        .heart-filter-btn:hover { color: var(--accent); border-color: var(--accent-soft); }
+        .heart-filter-btn.is-on { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); box-shadow: 0 0 9px color-mix(in srgb, var(--accent) 50%, transparent); }
+        .shelf-nav__categories { padding-top: 14px; border-top: 1px dashed var(--line-dark); }
         .poster-click { cursor: pointer; flex: none; }
         .poster-tile { text-align: left; }
         .detail-head { display: flex; gap: 14px; }
@@ -3232,18 +3238,21 @@ function MovieCollectionApp() {
         <hr />
         <div className="sidebar-section">
           <h3>보유 상태</h3>
+          <div className="status-row">
           <div className="segmented">
             <button type="button" className={statusFilter === 'all' ? 'is-active' : ''} onClick={() => setStatusFilter('all')}>전체</button>
             <button type="button" className={statusFilter === 'owned' ? 'is-active' : ''} onClick={() => setStatusFilter('owned')}>보유</button>
             <button type="button" className={statusFilter === 'wishlist' ? 'is-active' : ''} onClick={() => setStatusFilter('wishlist')}>미보유</button>
           </div>
-        </div>
-        <hr />
-        <div className="sidebar-section">
-          <h3>하트</h3>
-          <div className="segmented">
-            <button type="button" className={!favoriteOnly ? 'is-active' : ''} onClick={() => setFavoriteOnly(false)}>전체</button>
-            <button type="button" className={favoriteOnly ? 'is-active' : ''} onClick={() => setFavoriteOnly(true)}>하트만 ({movies.filter(m => m.favorite).length})</button>
+          <button
+            type="button"
+            className={`heart-filter-btn${favoriteOnly ? ' is-on' : ''}`}
+            title={favoriteOnly ? '하트 표시한 영화만 보는 중 (누르면 전체)' : '하트 표시한 영화만 보기'}
+            aria-pressed={favoriteOnly}
+            onClick={() => setFavoriteOnly(v => !v)}
+          >
+            <HeartIcon size={16} style={favoriteOnly ? { fill: 'currentColor' } : undefined} />
+          </button>
           </div>
         </div>
         <hr />
@@ -3279,7 +3288,7 @@ function MovieCollectionApp() {
             className={`btn btn--ghost shelf-toggle-btn${shelfModeOn ? ' is-active' : ''}`}
             onClick={() => setShelfModeOn(v => !v)}
           >
-            보관함
+            DVD
           </button>
           <select className="sort-select" value={sortBy} onChange={e => setSortBy(e.target.value)}>
             <option value="recent">최근 추가순</option>
