@@ -992,7 +992,8 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
     return Array.from(set);
   }, [movies]);
 
-  const hasPhysical = selectedFormats.some(f => PHYSICAL_FORMATS.includes(f)) || !!customText.trim() || !!seedLocation;
+  // 이미 보관 위치가 있는 영화는 매체 체크 여부와 상관없이 보관 위치를 유지한다.
+  const hasPhysical = selectedFormats.some(f => PHYSICAL_FORMATS.includes(f)) || !!customText.trim() || !!seedLocation || !!initial?.physicalLocation;
   const categoriesForSection = settings.categories.filter(c => c.section === locSection);
 
   useEffect(() => {
