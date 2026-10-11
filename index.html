@@ -665,6 +665,88 @@ function locationText(l) {
     : `${l.section} · (${l.categoryNumber}) ${l.categoryName}${l.itemNumber ? ` · ${l.itemNumber}번` : ''}`;
 }
 
+// ---- 위치 복구: 카테고리 이름·번호가 바뀌어 진열장에서 안 보이는 영화를 찾아 한꺼번에 되돌린다 ----
+const catKey = l => `${l.section}|${l.categoryName}|${String(l.categoryNumber ?? '')}`;
+function findOrphanGroups(movies, settings) {
+  const valid = new Set(settings.categories.map(c => `${c.section}|${c.name}|${String(c.number ?? '')}`));
+  const groups = new Map();
+  movies.forEach(m => {
+    const seen = new Set();
+    getLocations(m).forEach(l => {
+      if (l.individual) return;
+      const key = catKey(l);
+      if (valid.has(key)) return;
+      if (!groups.has(key)) {
+        groups.set(key, { key, section: l.section, categoryName: l.categoryName, categoryNumber: l.categoryNumber ?? '', titles: [], ids: [] });
+      }
+      if (seen.has(key)) return;
+      seen.add(key);
+      const g = groups.get(key);
+      g.titles.push(m.titleKr || '제목 없음');
+      g.ids.push(m.id);
+    });
+  });
+  return Array.from(groups.values());
+}
+function suggestCategory(g, categories) {
+  const num = String(g.categoryNumber ?? '');
+  const pick = arr => (arr.length === 1 ? arr[0] : null);
+  return pick(categories.filter(c => c.name === g.categoryName && String(c.number) === num))
+    || pick(categories.filter(c => c.section === g.section && String(c.number) === num))
+    || pick(categories.filter(c => c.section === g.section && c.name === g.categoryName))
+    || null;
+}
+function LocationRepairModal({ groups, categories, onClose, onApply, saving }) {
+  const [choice, setChoice] = useState(() => {
+    const init = {};
+    groups.forEach(g => { const sug = suggestCategory(g, categories); init[g.key] = sug ? sug.id : ''; });
+    return init;
+  });
+  const sortedCats = categories.slice().sort((a, b) => String(a.section).localeCompare(String(b.section), 'ko') || a.number - b.number);
+  const selectedCount = groups.filter(g => choice[g.key]).length;
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <div className="drawer" onClick={e => e.stopPropagation()}>
+        <div className="drawer__head">
+          <h2>영화 위치 복구</h2>
+          <button type="button" className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="drawer__body">
+          <p className="hint-text-small">카테고리 이름이나 번호를 바꾸기 전에 등록된 영화들이에요. 옛 위치별로 묶어서 보여드려요. 오른쪽에서 지금 쓰는 카테고리를 고르면 그 카테고리 칸으로 한꺼번에 옮겨져요. 칸 번호는 그대로 유지돼요.</p>
+          {groups.length === 0 && <p className="hint-text-small">복구할 영화가 없어요.</p>}
+          {groups.map(g => (
+            <div key={g.key} className="repair-row">
+              <div className="repair-from">
+                <b>{g.section} › ({String(g.categoryNumber)}) {g.categoryName}</b>
+                <span>{g.ids.length}편 · {g.titles.slice(0, 3).join(', ')}{g.titles.length > 3 ? ' 외' : ''}</span>
+              </div>
+              <select value={choice[g.key] || ''} onChange={e => setChoice(prev => ({ ...prev, [g.key]: e.target.value }))}>
+                <option value="">복구할 카테고리 선택 (선택 안 하면 그대로 둠)</option>
+                {sortedCats.map(c => (
+                  <option key={c.id} value={c.id}>{c.section} › ({c.number}) {c.name}</option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+        <div className="drawer__foot">
+          <div className="drawer__foot-actions">
+            <button type="button" className="btn btn--ghost" onClick={onClose}>닫기</button>
+            <button
+              type="button"
+              className="btn btn--primary"
+              disabled={saving || selectedCount === 0}
+              onClick={() => onApply(groups.filter(g => choice[g.key]).map(g => ({ from: g, to: categories.find(c => c.id === choice[g.key]) })))}
+            >
+              {selectedCount}개 위치 복구하기
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function HeartButton({ movie, className = '', size = 15 }) {
   const on = !!movie.favorite;
   return (
@@ -1852,13 +1934,17 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
                     }}
                   />
                   <input
-                    value={s.name}
-                    onChange={e => {
-                      const v = e.target.value;
-                      if (!v.trim()) return;
-                      onUpdateSection(s.id, { name: v });
+                    key={`sn-${s.id}-${s.name}`}
+                    defaultValue={s.name}
+                    onBlur={e => {
+                      const v = e.target.value.trim();
+                      if (!v) { e.target.value = s.name; return; }
+                      if (v === s.name) return;
+                      const ok = onUpdateSection(s.id, { name: v });
+                      if (ok === false) { e.target.value = s.name; return; }
                       if (activeSection === s.name) setActiveSection(v);
                     }}
+                    onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
                   />
                   <select
                     className="section-region-select"
@@ -1902,20 +1988,35 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
                 {categories.map(c => (
                   <div key={c.id} className="category-edit-row">
                     <input
+                      key={`cn-${c.id}-${c.number}`}
                       type="number" min={1} max={20}
-                      value={c.number}
-                      onChange={e => {
+                      defaultValue={c.number}
+                      onBlur={e => {
                         const raw = e.target.value;
-                        onUpdateCategory(c.id, { number: raw === '' ? '' : clamp(raw, 1, 20) });
+                        if (raw === '') { e.target.value = c.number; return; }
+                        const v = clamp(raw, 1, 20);
+                        if (String(v) !== String(c.number)) onUpdateCategory(c.id, { number: v });
                       }}
+                      onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
                     />
                     <input
-                      value={c.name}
-                      onChange={e => onUpdateCategory(c.id, { name: e.target.value })}
+                      key={`cm-${c.id}-${c.name}`}
+                      defaultValue={c.name}
+                      onBlur={e => {
+                        const v = e.target.value.trim();
+                        if (!v) { e.target.value = c.name; return; }
+                        if (v !== c.name) onUpdateCategory(c.id, { name: v });
+                      }}
+                      onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
                     />
                     <input
-                      value={c.description || ''}
-                      onChange={e => onUpdateCategory(c.id, { description: e.target.value })}
+                      key={`cd-${c.id}-${c.description || ''}`}
+                      defaultValue={c.description || ''}
+                      onBlur={e => {
+                        const v = e.target.value.trim();
+                        if (v !== (c.description || '')) onUpdateCategory(c.id, { description: v });
+                      }}
+                      onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
                       placeholder="설명 (마우스를 올리면 표시)"
                     />
                     <button type="button" className="icon-btn" onClick={() => onRemoveCategory(c.id)}><Trash2 size={14} /></button>
@@ -2568,6 +2669,10 @@ const APP_CSS = `
         .heart-filter-btn:hover { color: var(--accent); border-color: var(--accent-soft); }
         .heart-filter-btn.is-on { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); box-shadow: 0 0 9px color-mix(in srgb, var(--accent) 50%, transparent); }
         .shelf-view { gap: 12px; }
+        .shelf-orphan-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-radius: 10px; border: 1px solid color-mix(in srgb, #d9a441 55%, transparent); background: color-mix(in srgb, #d9a441 14%, transparent); color: var(--fg); font-size: 12.5px; line-height: 1.5; }
+        .repair-row { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-bottom: 1px dashed var(--line); }
+        .repair-from b { display: block; color: var(--ink); font-size: 13.5px; }
+        .repair-from span { font-size: 12px; color: var(--ink-soft); }
         .shelf-region-tabs { display: inline-flex; align-self: flex-start; gap: 2px; padding: 3px; background: var(--bg-panel); border: 1px solid var(--line-dark); border-radius: 999px; }
         .shelf-region { display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px; border: none; background: transparent; color: var(--fg-soft); font-size: 13px; font-weight: 700; cursor: pointer; }
         .shelf-region:hover { color: var(--fg); }
@@ -2583,7 +2688,11 @@ const APP_CSS = `
         .shelf-chip { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px; border-radius: 999px; border: 1px solid var(--line-dark); background: transparent; color: var(--fg-soft); font-size: 12px; font-weight: 600; white-space: nowrap; cursor: pointer; }
         .shelf-chip:hover { border-color: var(--gold); color: var(--fg); }
         .shelf-chip.is-active { background: color-mix(in srgb, var(--gold) 22%, transparent); border-color: var(--gold); color: var(--fg); }
+        .shelf-chip.is-full { background: var(--gold); border-color: var(--gold); color: var(--bg); }
+        .shelf-chip.is-full:hover { color: var(--bg); filter: brightness(1.06); }
+        .shelf-chip.is-full.is-active { box-shadow: 0 0 0 2px var(--bg-panel), 0 0 0 4px var(--gold); }
         .shelf-chip__count { font-size: 10.5px; opacity: 0.7; font-variant-numeric: tabular-nums; }
+        .shelf-chip.is-full .shelf-chip__count { opacity: 0.95; font-weight: 700; }
         .shelf-chip__name--tip { border-bottom: 1px dotted currentColor; }
         .shelf-chip[data-tip]:hover::after, .shelf-chip[data-tip]:focus-visible::after { content: attr(data-tip); position: absolute; left: 0; top: calc(100% + 6px); z-index: 30; min-width: 140px; max-width: 260px; white-space: normal; padding: 7px 10px; border-radius: 8px; background: var(--paper); color: var(--ink); border: 1px solid var(--line-dark); box-shadow: 0 4px 14px rgba(0,0,0,0.28); font-size: 12px; font-weight: 500; line-height: 1.45; pointer-events: none; }
         .shelf-crumb { font-size: 12.5px; color: var(--fg-soft); }
@@ -2656,7 +2765,7 @@ function ShelfSlotEmpty({ n, gallery, onClick }) {
 // 물리 매체(DVD/블루레이 등)를 실제 보관함처럼 섹션 → 카테고리 → 진열번호(최대 24)
 // 순으로 탐색하는 뷰. 빈 칸은 비어있는 상태 그대로 보여준다.
 // 섹션에 묶이지 않은 '개별 보관' 항목은 별도 탭으로 모아서 보여준다.
-function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, shelfSection, setShelfSection, shelfCategoryId, setShelfCategoryId, onEdit, onOpenDetail, onFilter, onMoveToOwned, onAddSequel, onAddAtSlot }) {
+function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, shelfSection, setShelfSection, shelfCategoryId, setShelfCategoryId, onEdit, onOpenDetail, orphanCount, onOpenRepair, onFilter, onMoveToOwned, onAddSequel, onAddAtSlot }) {
   const physicalEntries = useMemo(
     () => movies.flatMap(m => getLocations(m).map(l => ({ m, l }))),
     [movies]
@@ -2747,6 +2856,12 @@ function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, sh
 
   return (
     <div className="shelf-view">
+      {orphanCount > 0 && (
+        <div className="shelf-orphan-banner">
+          <span>⚠️ 위치 정보가 지금의 섹션·카테고리와 맞지 않아 진열장에 보이지 않는 영화가 {orphanCount}편 있어요.</span>
+          <button type="button" className="btn btn--ghost btn--sm" onClick={onOpenRepair}>복구하기</button>
+        </div>
+      )}
       <div className="shelf-region-tabs">
         {[...REGIONS, SHELF_INDIVIDUAL].map(r => (
           <button
@@ -2784,12 +2899,12 @@ function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, sh
               <button
                 key={c.id}
                 type="button"
-                className={`shelf-chip${shelfCategoryId === c.id ? ' is-active' : ''}`}
+                className={`shelf-chip${shelfCategoryId === c.id ? ' is-active' : ''}${fillOf(c) >= 24 ? ' is-full' : ''}`}
                 data-tip={c.description || undefined}
                 onClick={() => setShelfCategoryId(c.id)}
               >
                 <span className={c.description ? 'shelf-chip__name--tip' : undefined}>({c.number}) {c.name}</span>
-                <span className="shelf-chip__count">{fillOf(c)}/24</span>
+                <span className="shelf-chip__count">{fillOf(c) >= 24 ? '✓ 24/24' : `${fillOf(c)}/24`}</span>
               </button>
             ))
           )}
@@ -2870,7 +2985,10 @@ function MovieCollectionApp() {
   const [bulkLocationSeed, setBulkLocationSeed] = useState(null);
   const [slotAddContext, setSlotAddContext] = useState(null);
   const [detailId, setDetailId] = useState(null);
+  const [repairOpen, setRepairOpen] = useState(false);
   const detailMovie = detailId ? movies.find(m => m.id === detailId) || null : null;
+  const orphanGroups = useMemo(() => findOrphanGroups(movies, settings), [movies, settings]);
+  const orphanCount = useMemo(() => new Set(orphanGroups.flatMap(g => g.ids)).size, [orphanGroups]);
   appActions.toggleFavorite = handleToggleFavorite;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState('');
@@ -3069,12 +3187,22 @@ function MovieCollectionApp() {
 
   function handleUpdateSection(id, patch) {
     const target = settings.sections.find(s => s.id === id);
-    if (!target) return;
+    if (!target) return true;
+    const renamed = patch.name !== undefined && patch.name !== target.name;
+    if (renamed && settings.sections.some(s => s.id !== id && s.name === patch.name)) {
+      window.alert(`「${patch.name}」 섹션이 이미 있어요. 다른 이름을 사용해주세요.`);
+      return false;
+    }
     const nextSections = settings.sections.map(s => s.id === id ? { ...s, ...patch } : s);
-    const nextCategories = (patch.name && patch.name !== target.name)
+    const nextCategories = renamed
       ? settings.categories.map(c => c.section === target.name ? { ...c, section: patch.name } : c)
       : settings.categories;
-    persistSettings({ ...settings, sections: nextSections, categories: nextCategories });
+    const nextSettings = { ...settings, sections: nextSections, categories: nextCategories };
+    if (!renamed) { persistSettings(nextSettings); return true; }
+    const updated = remapMoviesLocations(l => l.section === target.name, l => ({ ...l, section: patch.name }));
+    if (updated.length === 0) { persistSettings(nextSettings); return true; }
+    persistSettingsWithMovies(nextSettings, updated, '섹션 이름 변경');
+    return true;
   }
 
   function handleRemoveSection(id) {
@@ -3092,8 +3220,95 @@ function MovieCollectionApp() {
     persistSettings({ ...settings, categories: [...settings.categories, { id: uid(), section, number, name, description }] });
   }
 
+  async function persistSettingsWithMovies(nextSettings, updatedMovies, label) {
+    beginSaving();
+    try {
+      for (const mv of updatedMovies) {
+        await window.storage.set(`movie:${mv.id}`, JSON.stringify(mv), false);
+      }
+      await window.storage.set('settings', JSON.stringify(nextSettings), false);
+      const byId = new Map(updatedMovies.map(mv => [mv.id, mv]));
+      const nextMovies = movies.map(mv => byId.get(mv.id) || mv);
+      setMovies(nextMovies);
+      setSettings(nextSettings);
+      saveLocalCache({ movies: nextMovies, customFormats, settings: nextSettings });
+      makeBackupAfterSave(nextMovies, label, { customFormats, settings: nextSettings });
+    } catch (e) {
+      console.error(e);
+      window.alert('⚠️ 이름 변경을 끝까지 저장하지 못했어요. 새로고침해서 영화 위치가 맞는지 확인해 주세요.');
+    } finally {
+      endSaving();
+    }
+  }
+
+  function remapMoviesLocations(matchFn, remapFn) {
+    const result = [];
+    movies.forEach(mv => {
+      const hasPhys = mv.physicalLocation && matchFn(mv.physicalLocation);
+      const hasLocs = Array.isArray(mv.locations) && mv.locations.some(matchFn);
+      if (!hasPhys && !hasLocs) return;
+      result.push({
+        ...mv,
+        physicalLocation: hasPhys ? remapFn(mv.physicalLocation) : mv.physicalLocation,
+        locations: hasLocs ? mv.locations.map(l => (matchFn(l) ? remapFn(l) : l)) : mv.locations,
+      });
+    });
+    return result;
+  }
+
+  async function handleApplyRepair(assignments) {
+    if (loadError) {
+      window.alert('⚠️ 영화 전체 목록을 정상적으로 불러온 뒤 복구해 주세요.');
+      return;
+    }
+    const byKey = new Map(assignments.map(a => [a.from.key, a.to]));
+    const remapLoc = l => {
+      if (!l || l.individual) return l;
+      const to = byKey.get(catKey(l));
+      return to ? { ...l, section: to.section, categoryName: to.name, categoryNumber: to.number } : l;
+    };
+    const updated = [];
+    movies.forEach(mv => {
+      const newPhys = mv.physicalLocation ? remapLoc(mv.physicalLocation) : mv.physicalLocation;
+      const newLocs = Array.isArray(mv.locations) ? mv.locations.map(remapLoc) : mv.locations;
+      if (JSON.stringify(newPhys) !== JSON.stringify(mv.physicalLocation) || JSON.stringify(newLocs) !== JSON.stringify(mv.locations)) {
+        updated.push({ ...mv, physicalLocation: newPhys, locations: newLocs });
+      }
+    });
+    if (updated.length === 0) { setRepairOpen(false); return; }
+    beginSaving();
+    try {
+      for (const mv of updated) {
+        await window.storage.set(`movie:${mv.id}`, JSON.stringify(mv), false);
+      }
+      const byId = new Map(updated.map(mv => [mv.id, mv]));
+      const nextMovies = movies.map(mv => byId.get(mv.id) || mv);
+      setMovies(nextMovies);
+      saveLocalCache({ movies: nextMovies, customFormats, settings });
+      makeBackupAfterSave(nextMovies, '영화 위치 복구');
+      setRepairOpen(false);
+      window.alert(`${updated.length}편의 위치를 복구했어요.`);
+    } catch (e) {
+      console.error(e);
+      window.alert('⚠️ 위치 복구를 끝까지 저장하지 못했어요. 새로고침 후 다시 시도해 주세요.');
+    } finally {
+      endSaving();
+    }
+  }
+
   function handleUpdateCategory(id, patch) {
-    persistSettings({ ...settings, categories: settings.categories.map(c => c.id === id ? { ...c, ...patch } : c) });
+    const target = settings.categories.find(c => c.id === id);
+    if (!target) return;
+    const nextSettings = { ...settings, categories: settings.categories.map(c => c.id === id ? { ...c, ...patch } : c) };
+    const newName = patch.name !== undefined ? patch.name : target.name;
+    const newNumber = patch.number !== undefined ? patch.number : target.number;
+    const changed = newName !== target.name || String(newNumber) !== String(target.number);
+    if (!changed) { persistSettings(nextSettings); return; }
+    const match = l => l.section === target.section && l.categoryName === target.name &&
+      String(l.categoryNumber ?? '') === String(target.number ?? '');
+    const updated = remapMoviesLocations(match, l => ({ ...l, categoryName: newName, categoryNumber: newNumber }));
+    if (updated.length === 0) { persistSettings(nextSettings); return; }
+    persistSettingsWithMovies(nextSettings, updated, '카테고리 변경');
   }
 
   function handleRemoveCategory(id) {
@@ -3528,6 +3743,8 @@ function MovieCollectionApp() {
             shelfRegion={shelfRegion}
             setShelfRegion={setShelfRegion}
             shelfSection={shelfSection}
+            orphanCount={orphanCount}
+            onOpenRepair={() => setRepairOpen(true)}
             setShelfSection={setShelfSection}
             shelfCategoryId={shelfCategoryId}
             setShelfCategoryId={setShelfCategoryId}
@@ -3588,6 +3805,16 @@ function MovieCollectionApp() {
           </div>
         )}
       </main>
+
+      {repairOpen && (
+        <LocationRepairModal
+          groups={orphanGroups}
+          categories={settings.categories}
+          saving={saving}
+          onClose={() => setRepairOpen(false)}
+          onApply={handleApplyRepair}
+        />
+      )}
 
       {detailMovie && (
         <MovieDetailModal
