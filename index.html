@@ -746,12 +746,12 @@ function LocationRepairModal({ groups, categories, onClose, onApply, saving }) {
   );
 }
 
-function DiscContentsModal({ items, onClose, onPick, onAdd }) {
+function DiscContentsModal({ items, onClose, onPick, onAdd, title }) {
   return (
     <div className="drawer-backdrop" onClick={onClose}>
       <div className="drawer" onClick={e => e.stopPropagation()}>
         <div className="drawer__head">
-          <h2>이 디스크에 든 영화 {items.length}편</h2>
+          <h2>{title || `이 디스크에 든 영화 ${items.length}편`}</h2>
           <button type="button" className="icon-btn" onClick={onClose}><X size={18} /></button>
         </div>
         <div className="drawer__body">
@@ -776,7 +776,7 @@ function DiscContentsModal({ items, onClose, onPick, onAdd }) {
         <div className="drawer__foot">
           <div className="drawer__foot-actions">
             <button type="button" className="btn btn--ghost" onClick={onClose}>닫기</button>
-            <button type="button" className="btn btn--primary" onClick={onAdd}><Plus size={14} /> 이 디스크에 영화 추가</button>
+            {onAdd && <button type="button" className="btn btn--primary" onClick={onAdd}><Plus size={14} /> 이 디스크에 영화 추가</button>}
           </div>
         </div>
       </div>
@@ -3061,7 +3061,7 @@ function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, sh
           <div className="grid">
             {slotNumbers.map(n => (
               slotMovies[n]
-                ? <MovieCard key={n} movie={slotMovies[n][0].m} focusLoc={slotMovies[n][0].loc} sharedCount={slotMovies[n].length} onOpenDetail={slotMovies[n].length > 1 ? (() => setGroupItems(slotMovies[n])) : onOpenDetail} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />
+                ? <div key={n} style={{ display: 'contents' }}>{slotMovies[n].map(({ m: cm, loc: cl }) => <MovieCard key={`${n}-${cm.id}`} movie={cm} focusLoc={cl} sharedCount={slotMovies[n].length} onOpenDetail={onOpenDetail} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />)}</div>
                 : <ShelfSlotEmpty key={n} n={n} onClick={() => onAddAtSlot({ section: shelfSection, categoryName: selectedCategory.name, categoryNumber: selectedCategory.number, itemNumber: n })} />
             ))}
           </div>
@@ -3101,6 +3101,7 @@ function MovieCollectionApp() {
   const [bulkLocationSeed, setBulkLocationSeed] = useState(null);
   const [slotAddContext, setSlotAddContext] = useState(null);
   const [detailId, setDetailId] = useState(null);
+  const [editPick, setEditPick] = useState(null);
   const [repairOpen, setRepairOpen] = useState(false);
   const detailMovie = detailId ? movies.find(m => m.id === detailId) || null : null;
   const orphanGroups = useMemo(() => findOrphanGroups(movies, settings), [movies, settings]);
@@ -3522,6 +3523,29 @@ function MovieCollectionApp() {
     }
   }
 
+  function openEditForm(mv) {
+    setEditingMovie(mv);
+    setFormSeed(null);
+    setFormOpen(true);
+  }
+
+  // 같은 디스크(같은 칸)에 다른 영화가 함께 있으면, 편집할 영화를 먼저 고르게 한다.
+  function handleEditRequest(mv) {
+    const co = [];
+    getLocations(mv).filter(l => !l.individual).forEach(l => {
+      movies.forEach(o => {
+        if (o.id === mv.id || co.some(x => x.m.id === o.id)) return;
+        const together = getLocations(o).some(ol => !ol.individual &&
+          ol.section === l.section && ol.categoryName === l.categoryName &&
+          String(ol.categoryNumber ?? '') === String(l.categoryNumber ?? '') &&
+          Number(ol.itemNumber) === Number(l.itemNumber));
+        if (together) co.push({ m: o });
+      });
+    });
+    if (co.length === 0) { openEditForm(mv); return; }
+    setEditPick([{ m: mv }, ...co]);
+  }
+
   async function handleAddToDisc(slot) {
     if (loadError) {
       window.alert('⚠️ 영화 전체 목록을 정상적으로 불러온 뒤 추가해 주세요.');
@@ -3924,7 +3948,7 @@ function MovieCollectionApp() {
             setShelfSection={setShelfSection}
             shelfCategoryId={shelfCategoryId}
             setShelfCategoryId={setShelfCategoryId}
-            onEdit={mv => { setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }}
+            onEdit={handleEditRequest}
             onOpenDetail={mv => setDetailId(mv.id)}
             onAddToDisc={handleAddToDisc}
             onFilter={openFilter}
@@ -3993,13 +4017,22 @@ function MovieCollectionApp() {
         />
       )}
 
+      {editPick && (
+        <DiscContentsModal
+          items={editPick}
+          title="편집할 영화를 선택하세요"
+          onClose={() => setEditPick(null)}
+          onPick={mv => { setEditPick(null); openEditForm(mv); }}
+        />
+      )}
+
       {detailMovie && (
         <MovieDetailModal
           movie={detailMovie}
           onClose={() => setDetailId(null)}
           onFilter={openFilter}
           onAddToDisc={slot => { setDetailId(null); handleAddToDisc(slot); }}
-          onEdit={mv => { setDetailId(null); setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }}
+          onEdit={mv => { setDetailId(null); handleEditRequest(mv); }}
         />
       )}
 
