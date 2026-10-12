@@ -1062,7 +1062,6 @@ function StarRating({ value, onChange, size = 15, readOnly = false }) {
   const pct = Math.max(0, Math.min(100, (display / 5) * 100));
 
   if (readOnly) {
-    // 별점을 아직 안 매긴 영화는 별을 아예 그리지 않고, 매긴 영화는 별 하나씩 따로 채운다.
     const v = Number(value);
     if (!(v > 0)) return null;
     const shown = Math.min(5, v);
@@ -3504,6 +3503,7 @@ function MovieCollectionApp() {
     for (const f of filterFormatOptions) counts[f] = 0;
 
     for (const m of movies) {
+      if (statusFilter !== 'all' && m.status !== statusFilter) continue;
       const formats = Array.isArray(m.formats) ? m.formats : [];
       if (formats.length === 0) {
         counts[UNCLASSIFIED_FORMAT] = (counts[UNCLASSIFIED_FORMAT] || 0) + 1;
@@ -3512,7 +3512,7 @@ function MovieCollectionApp() {
       }
     }
     return counts;
-  }, [movies, filterFormatOptions]);
+  }, [movies, filterFormatOptions, statusFilter]);
 
   const filteredMovies = useMemo(() => {
     let list = movies.filter(m => {
@@ -3726,7 +3726,7 @@ function MovieCollectionApp() {
             <option value="rating-desc">별점 높은순</option>
             <option value="rating-asc">별점 낮은순</option>
           </select>
-          <button type="button" className="btn btn--ghost" onClick={() => setBulkOpen(true)}><Upload size={15} /> 목록 붙여넣기</button>
+          <button type="button" className="btn btn--ghost" onClick={() => setBulkOpen(true)} title="목록 붙여넣기"><Upload size={15} /> 목록</button>
           <button type="button" className="btn btn--primary" onClick={() => { setEditingMovie(null); setFormSeed(null); setFormOpen(true); }}><Plus size={16} /> 새 영화</button>
         </div>
 
