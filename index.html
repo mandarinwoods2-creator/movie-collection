@@ -1370,7 +1370,8 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
     setNewCategoryNumber('');
   }
 
-  function handleSave() {
+  function handleSave(arg) {
+    const addNext = arg === true;
     if (!titleKr.trim()) return;
     let formats = [...selectedFormats];
     const custom = customText.trim();
@@ -1428,7 +1429,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
       hashtags: parseListInput(hashtagsRaw, true),
       notes: notes.trim(),
       createdAt: initial?.createdAt || Date.now(),
-    });
+    }, { addNext });
   }
 
   return (
@@ -1711,6 +1712,9 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
                         <input type="checkbox" checked={!!d.shared} onChange={e => updatePlanShared(i, e.target.checked)} />
                         한 디스크에 다른 영화도 함께 수록
                       </label>
+                      {d.shared && (
+                        <p className="hint-text-small">같은 칸을 다른 영화도 함께 쓸 수 있어요. 아래 「저장하고 다음 영화 추가」를 누르면 이 칸이 이미 채워진 새 등록 창이 바로 열려서, 같은 디스크의 다음 영화를 이어서 넣을 수 있어요.</p>
+                      )}
                     </div>
                   ))}
                   <button type="button" className="btn btn--ghost btn--sm" onClick={addPlanDisc}>+ 디스크 추가</button>
@@ -1747,6 +1751,9 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
           )}
           <div className="drawer__foot-actions">
             <button type="button" className="btn btn--ghost" onClick={onCancel} disabled={saving}>취소</button>
+            {locMode === 'section' && locSection && locCategoryName && discPlan.some(d => d.shared) && (
+              <button type="button" className="btn btn--ghost" onClick={() => handleSave(true)} disabled={!titleKr.trim() || saving}>저장하고 다음 영화 추가</button>
+            )}
             <button type="button" className="btn btn--primary" onClick={handleSave} disabled={!titleKr.trim() || saving}>{saving ? <><Loader2 size={14} className="spin" /> 저장 중...</> : '저장'}</button>
           </div>
         </div>
@@ -3433,7 +3440,7 @@ function MovieCollectionApp() {
     setSettingsOpen(true);
   }
 
-  async function handleSaveMovie(movieData) {
+  async function handleSaveMovie(movieData, opts = {}) {
     if (loadError) {
       window.alert('⚠️ 영화 전체 목록을 정상적으로 불러온 뒤 저장해 주세요.');
       return;
@@ -3445,8 +3452,25 @@ function MovieCollectionApp() {
         ? movies.map(m => m.id === movieData.id ? movieData : m)
         : [movieData, ...movies];
       setMovies(nextMovies);
-      setFormOpen(false);
-      setEditingMovie(null);
+      const firstLoc = (movieData.locations || [])[0];
+      if (opts && opts.addNext && firstLoc && !firstLoc.individual) {
+        setEditingMovie(null);
+        setFormSeed({
+          formats: ['DVD'],
+          sharedDisc: true,
+          nonce: Date.now(),
+          physicalLocation: {
+            section: firstLoc.section,
+            categoryName: firstLoc.categoryName,
+            categoryNumber: firstLoc.categoryNumber,
+            itemNumber: firstLoc.itemNumber,
+          },
+        });
+        setFormOpen(true);
+      } else {
+        setFormOpen(false);
+        setEditingMovie(null);
+      }
       saveLocalCache({ movies: nextMovies, customFormats, settings });
       // 백업은 완료를 기다리지 않고 배경에서 진행한다 (저장 체감 속도 개선).
       makeBackupAfterSave(nextMovies, movies.some(m => m.id === movieData.id) ? '영화 수정' : '영화 추가');
@@ -3530,6 +3554,7 @@ function MovieCollectionApp() {
     setFormSeed({
       formats: ['DVD'],
       sharedDisc: true,
+      nonce: Date.now(),
       physicalLocation: {
         section: slot.section,
         categoryName: slot.categoryName,
@@ -3980,6 +4005,7 @@ function MovieCollectionApp() {
 
       {formOpen && (
         <MovieForm
+          key={formSeed && formSeed.nonce ? `seed-${formSeed.nonce}` : (editingMovie ? editingMovie.id : 'new')}
           initial={editingMovie}
           seed={formSeed}
           formatOptions={allFormatOptions}
