@@ -746,8 +746,7 @@ function LocationRepairModal({ groups, categories, onClose, onApply, saving }) {
   );
 }
 
-// 한 디스크(한 칸)에 영화가 여러 편 들어 있을 때, 그 영화들을 목록으로 보여준다.
-function DiscContentsModal({ items, onClose, onPick }) {
+function DiscContentsModal({ items, onClose, onPick, onAdd }) {
   return (
     <div className="drawer-backdrop" onClick={onClose}>
       <div className="drawer" onClick={e => e.stopPropagation()}>
@@ -773,6 +772,12 @@ function DiscContentsModal({ items, onClose, onPick }) {
               </div>
             </div>
           ))}
+        </div>
+        <div className="drawer__foot">
+          <div className="drawer__foot-actions">
+            <button type="button" className="btn btn--ghost" onClick={onClose}>닫기</button>
+            <button type="button" className="btn btn--primary" onClick={onAdd}><Plus size={14} /> 이 디스크에 영화 추가</button>
+          </div>
         </div>
       </div>
     </div>
@@ -1162,7 +1167,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   const [locItemNumber, setLocItemNumber] = useState(initial?.physicalLocation?.itemNumber ?? seedLocation?.itemNumber ?? '');
   const [discPlan, setDiscPlan] = useState(() => {
     const ls = initial ? getLocations(initial).filter(l => !l.individual) : [];
-    if (!ls.length) return [{ contents: ['main'], note: '', slot: '', shared: false }];
+    if (!ls.length) return [{ contents: ['main'], note: '', slot: '', shared: !!seed?.sharedDisc }];
     return ls.map((l, i) => ({
       contents: l.contents || ['main'],
       note: l.note || '',
@@ -1222,7 +1227,6 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
     l.categoryName === locCategoryName &&
     String(l.categoryNumber ?? '') === String(locCategoryNumber ?? '');
 
-  // 칸 번호 -> 그 칸을 이미 쓰고 있는 다른 영화들 [{ title, shared }]
   const takenSlots = useMemo(() => {
     const map = new Map();
     movies.forEach(m => {
@@ -1783,6 +1787,7 @@ function SlotAddChoiceModal({ slot, onCancel, onChooseSingle, onChooseBulk }) {
 
 function BulkImportModal({ onCancel, onConfirm, saving, locationSeed }) {
   const [text, setText] = useState('');
+  const [sameDisc, setSameDisc] = useState(false);
   const [parsed, setParsed] = useState(null);
 
   function handlePreview() {
@@ -1804,9 +1809,10 @@ function BulkImportModal({ onCancel, onConfirm, saving, locationSeed }) {
             categoryName: locationSeed.categoryName,
             categoryNumber: locationSeed.categoryNumber,
             itemNumber: n,
+            ...(sameDisc ? { shared: true } : {}),
           };
           m.formats = ['DVD'];
-          n += 1;
+          if (!sameDisc) n += 1;
         }
       });
     }
@@ -1823,8 +1829,15 @@ function BulkImportModal({ onCancel, onConfirm, saving, locationSeed }) {
         <div className="drawer__body">
           {locationSeed && (
             <p className="hint-text">
-              <b>{locationSeed.section} ({locationSeed.categoryNumber}) {locationSeed.categoryName}</b>의 <b>{locationSeed.itemNumber}번</b>부터 순서대로 번호가 매겨져요 (최대 24번까지).
+              <b>{locationSeed.section} ({locationSeed.categoryNumber}) {locationSeed.categoryName}</b>의 <b>{locationSeed.itemNumber}번</b>
+              {sameDisc ? '에 붙여넣은 영화를 전부 한 디스크로 묶어요.' : '부터 순서대로 번호가 매겨져요 (최대 24번까지).'}
             </p>
+          )}
+          {locationSeed && (
+            <label className="checkbox-row">
+              <input type="checkbox" checked={sameDisc} onChange={e => { setSameDisc(e.target.checked); setParsed(null); }} />
+              한 디스크에 모두 수록 (체크 해제하면 한 칸에 한 편씩 뒤 칸까지 채워요)
+            </label>
           )}
           <p className="hint-text">
             기존에 쓰던 형식 그대로 붙여넣으세요.<br />
@@ -2169,7 +2182,7 @@ function PosterMovieTile({ movie, onEdit, focusLoc, sharedCount }) {
   );
 }
 
-function MovieDetailModal({ movie, onClose, onEdit, onFilter }) {
+function MovieDetailModal({ movie, onClose, onEdit, onFilter, onAddToDisc }) {
   const locs = getLocations(movie);
   const countries = movie.countries || (movie.country ? [movie.country] : []);
   const genres = movie.genres || (movie.genre ? [movie.genre] : []);
@@ -2232,6 +2245,15 @@ function MovieDetailModal({ movie, onClose, onEdit, onFilter }) {
                   <DiscBadge loc={l} total={locs.length} />
                   {l.shared && <span className="shared-badge">다른 영화와 한 디스크</span>}
                   {l.note && <span className="detail-sub">{l.note}</span>}
+                  {!l.individual && onAddToDisc && (
+                    <button
+                      type="button"
+                      className="link-btn"
+                      onClick={() => onAddToDisc({ section: l.section, categoryName: l.categoryName, categoryNumber: l.categoryNumber, itemNumber: l.itemNumber })}
+                    >
+                      + 이 디스크에 영화 추가
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -2838,13 +2860,12 @@ function ShelfSlotEmpty({ n, gallery, onClick }) {
 // 물리 매체(DVD/블루레이 등)를 실제 보관함처럼 섹션 → 카테고리 → 진열번호(최대 24)
 // 순으로 탐색하는 뷰. 빈 칸은 비어있는 상태 그대로 보여준다.
 // 섹션에 묶이지 않은 '개별 보관' 항목은 별도 탭으로 모아서 보여준다.
-function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, shelfSection, setShelfSection, shelfCategoryId, setShelfCategoryId, onEdit, onOpenDetail, orphanCount, onOpenRepair, onFilter, onMoveToOwned, onAddSequel, onAddAtSlot }) {
+function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, shelfSection, setShelfSection, shelfCategoryId, setShelfCategoryId, onEdit, onOpenDetail, onAddToDisc, orphanCount, onOpenRepair, onFilter, onMoveToOwned, onAddSequel, onAddAtSlot }) {
   const [groupItems, setGroupItems] = useState(null);
   const physicalEntries = useMemo(
     () => movies.flatMap(m => getLocations(m).map(l => ({ m, l }))),
     [movies]
   );
-  // DVD 장(디스크 칸) 기준 집계: 같은 칸에 영화가 여러 편 있어도 1장으로 센다. 개별 보관은 영화 편수.
   const regionCounts = useMemo(() => {
     const nameToRegion = new Map(settings.sections.map(sec => [sec.name, sectionRegion(sec)]));
     const slotSets = {};
@@ -2991,6 +3012,11 @@ function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, sh
           items={groupItems}
           onClose={() => setGroupItems(null)}
           onPick={mv => { setGroupItems(null); (onOpenDetail || onEdit)(mv); }}
+          onAdd={() => {
+            const l = groupItems[0].loc;
+            setGroupItems(null);
+            onAddToDisc({ section: l.section, categoryName: l.categoryName, categoryNumber: l.categoryNumber, itemNumber: l.itemNumber });
+          }}
         />
       )}
 
@@ -3472,6 +3498,48 @@ function MovieCollectionApp() {
     }
   }
 
+  async function handleAddToDisc(slot) {
+    if (loadError) {
+      window.alert('⚠️ 영화 전체 목록을 정상적으로 불러온 뒤 추가해 주세요.');
+      return;
+    }
+    const sameSlot = l => !l.individual && l.section === slot.section && l.categoryName === slot.categoryName &&
+      String(l.categoryNumber ?? '') === String(slot.categoryNumber ?? '') && Number(l.itemNumber) === Number(slot.itemNumber);
+    const toMark = movies.filter(m => getLocations(m).some(l => sameSlot(l) && !l.shared));
+    if (toMark.length > 0) {
+      beginSaving();
+      try {
+        const updated = toMark.map(m => ({ ...m, locations: getLocations(m).map(l => (sameSlot(l) ? { ...l, shared: true } : l)) }));
+        for (const mv of updated) {
+          await window.storage.set(`movie:${mv.id}`, JSON.stringify(mv), false);
+        }
+        const byId = new Map(updated.map(mv => [mv.id, mv]));
+        const nextMovies = movies.map(mv => byId.get(mv.id) || mv);
+        setMovies(nextMovies);
+        saveLocalCache({ movies: nextMovies, customFormats, settings });
+        makeBackupAfterSave(nextMovies, '한 디스크 수록 표시');
+      } catch (e) {
+        console.error(e);
+        window.alert('⚠️ 기존 영화에 함께 수록 표시를 저장하지 못했어요. 다시 시도해 주세요.');
+        return;
+      } finally {
+        endSaving();
+      }
+    }
+    setEditingMovie(null);
+    setFormSeed({
+      formats: ['DVD'],
+      sharedDisc: true,
+      physicalLocation: {
+        section: slot.section,
+        categoryName: slot.categoryName,
+        categoryNumber: slot.categoryNumber,
+        itemNumber: slot.itemNumber,
+      },
+    });
+    setFormOpen(true);
+  }
+
   async function handleMoveToOwned(movie) {
     const updated = { ...movie, status: 'owned' };
     beginSaving();
@@ -3833,6 +3901,7 @@ function MovieCollectionApp() {
             setShelfCategoryId={setShelfCategoryId}
             onEdit={mv => { setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }}
             onOpenDetail={mv => setDetailId(mv.id)}
+            onAddToDisc={handleAddToDisc}
             onFilter={openFilter}
             onMoveToOwned={handleMoveToOwned}
             onAddSequel={handleAddSequel}
@@ -3904,6 +3973,7 @@ function MovieCollectionApp() {
           movie={detailMovie}
           onClose={() => setDetailId(null)}
           onFilter={openFilter}
+          onAddToDisc={slot => { setDetailId(null); handleAddToDisc(slot); }}
           onEdit={mv => { setDetailId(null); setEditingMovie(mv); setFormSeed(null); setFormOpen(true); }}
         />
       )}
