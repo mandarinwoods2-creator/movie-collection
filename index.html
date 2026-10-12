@@ -746,6 +746,39 @@ function LocationRepairModal({ groups, categories, onClose, onApply, saving }) {
   );
 }
 
+// 한 디스크(한 칸)에 영화가 여러 편 들어 있을 때, 그 영화들을 목록으로 보여준다.
+function DiscContentsModal({ items, onClose, onPick }) {
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <div className="drawer" onClick={e => e.stopPropagation()}>
+        <div className="drawer__head">
+          <h2>이 디스크에 든 영화 {items.length}편</h2>
+          <button type="button" className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="drawer__body">
+          {items.map(({ m }) => (
+            <div
+              key={m.id}
+              className="disc-group-row"
+              role="button"
+              tabIndex={0}
+              onClick={() => onPick(m)}
+              onKeyDown={e => { if (e.key === 'Enter') onPick(m); }}
+            >
+              <Poster url={m.posterUrl} size="card" />
+              <div className="disc-group-row__info">
+                <b>{m.titleKr}</b>
+                <span>{[m.year, m.director].filter(Boolean).join(' · ')}</span>
+                <StarRating value={m.rating} readOnly size={12} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function HeartButton({ movie, className = '', size = 15 }) {
   const on = !!movie.favorite;
   return (
@@ -1129,10 +1162,11 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   const [locItemNumber, setLocItemNumber] = useState(initial?.physicalLocation?.itemNumber ?? seedLocation?.itemNumber ?? '');
   const [discPlan, setDiscPlan] = useState(() => {
     const ls = initial ? getLocations(initial).filter(l => !l.individual) : [];
-    if (!ls.length) return [{ contents: ['main'], note: '', slot: '' }];
+    if (!ls.length) return [{ contents: ['main'], note: '', slot: '', shared: false }];
     return ls.map((l, i) => ({
       contents: l.contents || ['main'],
       note: l.note || '',
+      shared: !!l.shared,
       slot: i === 0 || Number(l.itemNumber) === Number(ls[i - 1].itemNumber) + 1 ? '' : String(l.itemNumber ?? ''),
     }));
   });
@@ -1188,12 +1222,16 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
     l.categoryName === locCategoryName &&
     String(l.categoryNumber ?? '') === String(locCategoryNumber ?? '');
 
+  // 칸 번호 -> 그 칸을 이미 쓰고 있는 다른 영화들 [{ title, shared }]
   const takenSlots = useMemo(() => {
     const map = new Map();
     movies.forEach(m => {
       if (m.id === initial?.id) return;
       getLocations(m).forEach(l => {
-        if (sameShelf(l)) map.set(Number(l.itemNumber), m.titleKr || '제목 없음');
+        if (!sameShelf(l)) return;
+        const k = Number(l.itemNumber);
+        if (!map.has(k)) map.set(k, []);
+        map.get(k).push({ title: m.titleKr || '제목 없음', shared: !!l.shared });
       });
     });
     return map;
@@ -1231,10 +1269,17 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
     });
     return out;
   }, [discPlan, discStart]);
-  const slotProblems = plannedSlots.map((n, i) =>
-    n < 1 || n > 24 ? '1~24 범위 밖'
-    : (takenSlots.has(n) && !ownSlots.has(n)) ? `이미 사용 중: ${takenSlots.get(n)}`
-    : plannedSlots.indexOf(n) !== i ? '디스크 간 번호 중복' : '');
+  const slotProblems = plannedSlots.map((n, i) => {
+    if (n < 1 || n > 24) return '1~24 범위 밖';
+    const occ = takenSlots.get(n) || [];
+    if (occ.length > 0 && !ownSlots.has(n)) {
+      const canShare = !!discPlan[i].shared && occ.every(o => o.shared);
+      if (!canShare) {
+        return `이미 사용 중: ${occ.map(o => o.title).join(', ')} — 한 디스크에 여러 편이면 서로 '함께 수록'을 켜 주세요`;
+      }
+    }
+    return plannedSlots.indexOf(n) !== i ? '디스크 간 번호 중복' : '';
+  });
 
   function togglePlanContent(i, key) {
     setDiscPlan(p => p.map((d, di) => di !== i ? d : {
@@ -1243,7 +1288,8 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
   }
   const updatePlanNote = (i, note) => setDiscPlan(p => p.map((d, di) => di === i ? { ...d, note } : d));
   const updatePlanSlot = (i, slot) => setDiscPlan(p => p.map((d, di) => di === i ? { ...d, slot } : d));
-  const addPlanDisc = () => setDiscPlan(p => [...p, { contents: [], note: '', slot: '' }]);
+  const updatePlanShared = (i, shared) => setDiscPlan(p => p.map((d, di) => di === i ? { ...d, shared } : d));
+  const addPlanDisc = () => setDiscPlan(p => [...p, { contents: [], note: '', slot: '', shared: false }]);
   const removePlanDisc = i => setDiscPlan(p => p.filter((_, di) => di !== i));
 
   const regionSecs = sectionsOfRegion(settings, locRegion);
@@ -1343,10 +1389,11 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
       : sectionMode ? discPlan.map((d, i) => ({
           section: locSection, categoryName: locCategoryName, categoryNumber: locCategoryNumber,
           itemNumber: plannedSlots[i], disc: i + 1, contents: d.contents, note: d.note.trim(),
+          ...(d.shared ? { shared: true } : {}),
         }))
       : [];
     const physicalLocation = finalLocations[0]
-      ? (({ disc, contents, note, ...rest }) => rest)(finalLocations[0])
+      ? (({ disc, contents, note, shared, ...rest }) => rest)(finalLocations[0])
       : null;
     const trimmedSeriesName = seriesName.trim();
     const seriesId = resolveSeriesId(initial?.seriesId || seed?.seriesId || null, trimmedSeriesName, initial?.id, movies);
@@ -1656,6 +1703,10 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
                       {d.contents.includes('special') && (
                         <input value={d.note} onChange={e => updatePlanNote(i, e.target.value)} placeholder="Special Features 상세 (메이킹, 코멘터리 등, 선택)" />
                       )}
+                      <label className="checkbox-row">
+                        <input type="checkbox" checked={!!d.shared} onChange={e => updatePlanShared(i, e.target.checked)} />
+                        한 디스크에 다른 영화도 함께 수록
+                      </label>
                     </div>
                   ))}
                   <button type="button" className="btn btn--ghost btn--sm" onClick={addPlanDisc}>+ 디스크 추가</button>
@@ -2089,7 +2140,7 @@ function SeriesHeaderBar({ entry, onToggle }) {
 
 // 포스터만 촘촘히 진열한 '진열장' 뷰. 시리즈는 항상 이어서 배치되고,
 // 접혀있으면 묶음 타일 하나로, 펼쳐져 있으면 구분줄 + 개별 포스터로 보인다.
-function PosterMovieTile({ movie, onEdit, focusLoc }) {
+function PosterMovieTile({ movie, onEdit, focusLoc, sharedCount }) {
   const sColor = movie.seriesId ? seriesColor(movie.seriesId) : null;
   return (
     <div
@@ -2106,6 +2157,7 @@ function PosterMovieTile({ movie, onEdit, focusLoc }) {
       >
         <Poster url={movie.posterUrl} size="gallery" />
         {focusLoc && <DiscBadge loc={focusLoc} total={getLocations(movie).length} tile />}
+        {sharedCount > 1 && <span className="shared-badge shared-badge--tile">{sharedCount}편 수록</span>}
         <HeartButton movie={movie} className="heart-btn--tile" />
         {movie.status === 'wishlist' && <span className="poster-tile__wishlist-tag">미보유</span>}
         <div className="poster-tile__overlay">
@@ -2178,6 +2230,7 @@ function MovieDetailModal({ movie, onClose, onEdit, onFilter }) {
                 <div key={i} className="detail-loc">
                   <span className="location-tag"><MapPin size={12} />{locationText(l)}</span>
                   <DiscBadge loc={l} total={locs.length} />
+                  {l.shared && <span className="shared-badge">다른 영화와 한 디스크</span>}
                   {l.note && <span className="detail-sub">{l.note}</span>}
                 </div>
               ))}
@@ -2275,7 +2328,7 @@ function SeriesExpandedCardBlock({ entry, onToggle, onEdit, onFilter, onMoveToOw
   );
 }
 
-function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel, focusLoc, onOpenDetail }) {
+function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel, focusLoc, onOpenDetail, sharedCount }) {
   const [expanded, setExpanded] = useState(false);
   const sColor = movie.seriesId ? seriesColor(movie.seriesId) : null;
   const hasMoreInfo = !!(movie.synopsis || movie.notes);
@@ -2300,6 +2353,7 @@ function MovieCard({ movie, onEdit, onFilter, onMoveToOwned, onAddSequel, focusL
                 const all = getLocations(movie);
                 return (focusLoc ? [focusLoc] : all).map((l, i) => <DiscBadge key={i} loc={l} total={all.length} />);
               })()}
+              {sharedCount > 1 && <span className="shared-badge">디스크 {sharedCount}편 수록</span>}
             </span>
             {movie.titleOriginal && <span className="card__title-orig">{movie.titleOriginal}</span>}
           </div>
@@ -2664,6 +2718,13 @@ const APP_CSS = `
         .card__title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
         .disc-badge { display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 600; line-height: 1; padding: 3px 7px; border-radius: 999px; white-space: nowrap; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); }
         .disc-badge--tile { position: absolute; top: 6px; left: 6px; z-index: 1; color: #fff; background: rgba(0,0,0,0.48); border-color: rgba(255,255,255,0.35); font-size: 10px; padding: 2px 6px; }
+        .shared-badge { display: inline-flex; align-items: center; font-size: 10.5px; font-weight: 700; line-height: 1; padding: 3px 7px; border-radius: 999px; white-space: nowrap; color: var(--ink); background: color-mix(in srgb, var(--gold) 28%, transparent); border: 1px solid color-mix(in srgb, var(--gold) 55%, transparent); }
+        .shared-badge--tile { position: absolute; top: 6px; right: 6px; z-index: 1; color: #fff; background: rgba(0,0,0,0.55); border-color: rgba(255,255,255,0.4); font-size: 10px; padding: 2px 6px; }
+        .disc-group-row { display: flex; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px dashed var(--line); cursor: pointer; }
+        .disc-group-row:hover { background: color-mix(in srgb, var(--gold) 8%, transparent); }
+        .disc-group-row__info { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+        .disc-group-row__info b { color: var(--ink); font-size: 14px; }
+        .disc-group-row__info span { font-size: 12px; color: var(--ink-soft); }
         .card__actions { display: flex; align-items: center; gap: 2px; flex: none; }
         .heart-btn { display: inline-flex; align-items: center; justify-content: center; padding: 4px; border: none; background: none; cursor: pointer; color: var(--accent); opacity: 0; transition: opacity 0.12s, transform 0.12s; }
         .heart-btn:hover { transform: scale(1.12); }
@@ -2685,18 +2746,18 @@ const APP_CSS = `
         .repair-row { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-bottom: 1px dashed var(--line); }
         .repair-from b { display: block; color: var(--ink); font-size: 13.5px; }
         .repair-from span { font-size: 12px; color: var(--ink-soft); }
-        .shelf-region-tabs { display: inline-flex; align-self: flex-start; gap: 2px; padding: 3px; background: var(--bg-panel); border: 1px solid var(--line-dark); border-radius: 999px; }
+        .shelf-region-tabs { display: inline-flex; align-self: center; gap: 2px; padding: 3px; background: var(--bg-panel); border: 1px solid var(--line-dark); border-radius: 999px; }
         .shelf-region { display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px; border: none; background: transparent; color: var(--fg-soft); font-size: 13px; font-weight: 700; cursor: pointer; }
         .shelf-region:hover { color: var(--fg); }
         .shelf-region.is-active { background: var(--gold); color: var(--bg); }
         .shelf-region__count { font-size: 11px; font-weight: 600; opacity: 0.75; }
-        .shelf-nav__sections { display: flex; flex-wrap: wrap; gap: 2px 20px; border-bottom: 1px solid var(--line-dark); padding: 0 2px; }
+        .shelf-nav__sections { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px 20px; border-bottom: 1px solid var(--line-dark); padding: 0 2px; }
         .shelf-tab { display: inline-flex; align-items: center; gap: 6px; padding: 8px 2px; background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px; color: var(--fg-soft); font-size: 14px; font-weight: 600; white-space: nowrap; cursor: pointer; }
         .shelf-tab:hover { color: var(--fg); }
         .shelf-tab.is-active { color: var(--gold); border-bottom-color: var(--gold); }
         .shelf-tab__num { font-size: 11px; opacity: 0.6; }
         .shelf-tab__count { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: color-mix(in srgb, var(--gold) 16%, transparent); color: var(--fg-soft); }
-        .shelf-nav__categories { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; border-top: none; }
+        .shelf-nav__categories { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; padding: 0; border-top: none; }
         .shelf-chip { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px; border-radius: 999px; border: 1px solid var(--line-dark); background: transparent; color: var(--fg-soft); font-size: 12px; font-weight: 600; white-space: nowrap; cursor: pointer; }
         .shelf-chip:hover { border-color: var(--gold); color: var(--fg); }
         .shelf-chip.is-active { background: color-mix(in srgb, var(--gold) 22%, transparent); border-color: var(--gold); color: var(--fg); }
@@ -2706,8 +2767,8 @@ const APP_CSS = `
         .shelf-chip__count { font-size: 10.5px; opacity: 0.7; font-variant-numeric: tabular-nums; }
         .shelf-chip.is-full .shelf-chip__count { opacity: 0.95; font-weight: 700; }
         .shelf-chip__name--tip { border-bottom: 1px dotted currentColor; }
-        .shelf-chip[data-tip]:hover::after, .shelf-chip[data-tip]:focus-visible::after { content: attr(data-tip); position: absolute; left: 0; top: calc(100% + 6px); z-index: 30; min-width: 140px; max-width: 260px; white-space: normal; padding: 7px 10px; border-radius: 8px; background: var(--paper); color: var(--ink); border: 1px solid var(--line-dark); box-shadow: 0 4px 14px rgba(0,0,0,0.28); font-size: 12px; font-weight: 500; line-height: 1.45; pointer-events: none; }
-        .shelf-crumb { font-size: 12.5px; color: var(--fg-soft); }
+        .shelf-chip[data-tip]:hover::after, .shelf-chip[data-tip]:focus-visible::after { content: attr(data-tip); position: absolute; left: 50%; transform: translateX(-50%); top: calc(100% + 6px); z-index: 30; min-width: 140px; max-width: 260px; white-space: normal; padding: 7px 10px; border-radius: 8px; background: var(--paper); color: var(--ink); border: 1px solid var(--line-dark); box-shadow: 0 4px 14px rgba(0,0,0,0.28); font-size: 12px; font-weight: 500; line-height: 1.45; pointer-events: none; }
+        .shelf-crumb { font-size: 12.5px; color: var(--fg-soft); text-align: center; }
         .shelf-crumb__desc { opacity: 0.8; }
         .section-region-select { flex: none; width: 66px; font-size: 12px; padding: 4px 4px; }
         .mc-app--shelf { grid-template-columns: 1fr; }
@@ -2778,38 +2839,40 @@ function ShelfSlotEmpty({ n, gallery, onClick }) {
 // 순으로 탐색하는 뷰. 빈 칸은 비어있는 상태 그대로 보여준다.
 // 섹션에 묶이지 않은 '개별 보관' 항목은 별도 탭으로 모아서 보여준다.
 function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, shelfSection, setShelfSection, shelfCategoryId, setShelfCategoryId, onEdit, onOpenDetail, orphanCount, onOpenRepair, onFilter, onMoveToOwned, onAddSequel, onAddAtSlot }) {
+  const [groupItems, setGroupItems] = useState(null);
   const physicalEntries = useMemo(
     () => movies.flatMap(m => getLocations(m).map(l => ({ m, l }))),
     [movies]
   );
+  // DVD 장(디스크 칸) 기준 집계: 같은 칸에 영화가 여러 편 있어도 1장으로 센다. 개별 보관은 영화 편수.
   const regionCounts = useMemo(() => {
     const nameToRegion = new Map(settings.sections.map(sec => [sec.name, sectionRegion(sec)]));
-    const counts = {};
-    REGIONS.forEach(r => { counts[r] = 0; });
-    const seen = new Set();
+    const slotSets = {};
+    REGIONS.forEach(r => { slotSets[r] = new Set(); });
     const individualIds = new Set();
     physicalEntries.forEach(({ m, l }) => {
       if (l.individual) { individualIds.add(m.id); return; }
       const r = nameToRegion.get(l.section);
-      if (!r) return;
-      const key = `${r}|${m.id}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      counts[r] += 1;
+      const n = Number(l.itemNumber);
+      if (!r || !(n >= 1 && n <= 24)) return;
+      slotSets[r].add(`${l.section}|${l.categoryName}|${String(l.categoryNumber ?? '')}|${n}`);
     });
+    const counts = {};
+    REGIONS.forEach(r => { counts[r] = slotSets[r].size; });
     counts[SHELF_INDIVIDUAL] = individualIds.size;
     return counts;
   }, [physicalEntries, settings.sections]);
   const sectionCounts = useMemo(() => {
-    const counts = new Map();
-    const seen = new Set();
-    physicalEntries.forEach(({ m, l }) => {
+    const sets = new Map();
+    physicalEntries.forEach(({ l }) => {
       if (l.individual) return;
-      const key = `${l.section}|${m.id}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      counts.set(l.section, (counts.get(l.section) || 0) + 1);
+      const n = Number(l.itemNumber);
+      if (!(n >= 1 && n <= 24)) return;
+      if (!sets.has(l.section)) sets.set(l.section, new Set());
+      sets.get(l.section).add(`${l.categoryName}|${String(l.categoryNumber ?? '')}|${n}`);
     });
+    const counts = new Map();
+    sets.forEach((set, key) => counts.set(key, set.size));
     return counts;
   }, [physicalEntries]);
   const categoryFill = useMemo(() => {
@@ -2857,7 +2920,7 @@ function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, sh
       if (loc.individual) return;
       if (loc.section === shelfSection && loc.categoryName === selectedCategory.name && String(loc.categoryNumber) === String(selectedCategory.number)) {
         const n = Number(loc.itemNumber);
-        if (n >= 1 && n <= 24) map[n] = { m, loc };
+        if (n >= 1 && n <= 24) { (map[n] = map[n] || []).push({ m, loc }); }
       }
     });
     return map;
@@ -2882,7 +2945,7 @@ function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, sh
             className={`shelf-region${shelfRegion === r ? ' is-active' : ''}`}
             onClick={() => { setShelfRegion(r); setShelfSection(''); setShelfCategoryId(''); }}
           >
-            {r === SHELF_INDIVIDUAL ? '개별 보관' : r}<span className="shelf-region__count">{regionCounts[r] || 0}편</span>
+            {r === SHELF_INDIVIDUAL ? '개별 보관' : r}<span className="shelf-region__count">{regionCounts[r] || 0}{r === SHELF_INDIVIDUAL ? '편' : '장'}</span>
           </button>
         ))}
       </div>
@@ -2923,6 +2986,14 @@ function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, sh
         </div>
       )}
 
+      {groupItems && (
+        <DiscContentsModal
+          items={groupItems}
+          onClose={() => setGroupItems(null)}
+          onPick={mv => { setGroupItems(null); (onOpenDetail || onEdit)(mv); }}
+        />
+      )}
+
       {!isIndividual && selectedCategory && (
         <div className="shelf-crumb">
           {shelfRegion} › {shelfSection} › ({selectedCategory.number}) {selectedCategory.name} · {fillOf(selectedCategory)}/24
@@ -2949,7 +3020,7 @@ function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, sh
           <div className="poster-gallery">
             {slotNumbers.map(n => (
               slotMovies[n]
-                ? <PosterMovieTile key={n} movie={slotMovies[n].m} focusLoc={slotMovies[n].loc} onEdit={onOpenDetail || onEdit} />
+                ? <PosterMovieTile key={n} movie={slotMovies[n][0].m} focusLoc={slotMovies[n][0].loc} sharedCount={slotMovies[n].length} onEdit={slotMovies[n].length > 1 ? (() => setGroupItems(slotMovies[n])) : (onOpenDetail || onEdit)} />
                 : <ShelfSlotEmpty key={n} n={n} gallery onClick={() => onAddAtSlot({ section: shelfSection, categoryName: selectedCategory.name, categoryNumber: selectedCategory.number, itemNumber: n })} />
             ))}
           </div>
@@ -2957,7 +3028,7 @@ function ShelfView({ movies, settings, viewMode, shelfRegion, setShelfRegion, sh
           <div className="grid">
             {slotNumbers.map(n => (
               slotMovies[n]
-                ? <MovieCard key={n} movie={slotMovies[n].m} focusLoc={slotMovies[n].loc} onOpenDetail={onOpenDetail} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />
+                ? <MovieCard key={n} movie={slotMovies[n][0].m} focusLoc={slotMovies[n][0].loc} sharedCount={slotMovies[n].length} onOpenDetail={slotMovies[n].length > 1 ? (() => setGroupItems(slotMovies[n])) : onOpenDetail} onEdit={onEdit} onFilter={onFilter} onMoveToOwned={onMoveToOwned} onAddSequel={onAddSequel} />
                 : <ShelfSlotEmpty key={n} n={n} onClick={() => onAddAtSlot({ section: shelfSection, categoryName: selectedCategory.name, categoryNumber: selectedCategory.number, itemNumber: n })} />
             ))}
           </div>
