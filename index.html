@@ -611,6 +611,7 @@ const PackageCheck = makeIcon(<><path d="M16 16l2 2 4-4" /><path d="M21 10V7a2 2
 const Link2 = makeIcon(<><path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3" /><path d="M9 17H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3" /><line x1="8" y1="12" x2="16" y2="12" /></>);
 const DiscIcon = makeIcon(<><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="3" /></>);
 const HeartIcon = makeIcon(<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />);
+const DownloadIcon = makeIcon(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></>);
 const PlusCircle = makeIcon(<><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" /></>);
 
 // ================= 아래부터 앱 코드 =================
@@ -2291,6 +2292,305 @@ function MovieDetailModal({ movie, onClose, onEdit, onFilter, onAddToDisc }) {
   );
 }
 
+function reportEsc(v) {
+  return String(v == null ? '' : v).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;').split('"').join('&quot;');
+}
+function reportList(arr, single) {
+  return Array.isArray(arr) && arr.length ? arr : (single ? [single] : []);
+}
+function reportEntry(m, l, opts, slotSize) {
+  const countries = reportList(m.countries, m.country);
+  const genres = reportList(m.genres, m.genre);
+  const meta = [m.year, countries.join(', '), genres.join(', '), m.runtime ? m.runtime + '분' : '', m.ageRating].filter(Boolean).join(' · ');
+  const rows = [];
+  const add = (k, v) => { if (v) rows.push('<dt>' + k + '</dt><dd>' + v + '</dd>'); };
+  add('감독', reportEsc(m.director));
+  add('출연', reportEsc((m.actors || []).join(', ')));
+  if (m.seriesName) {
+    add('시리즈', reportEsc(m.seriesName + (m.seriesOrder !== '' && m.seriesOrder != null ? ' #' + m.seriesOrder : '') + (m.seriesUnofficial ? ' (비공식)' : '') + (m.seriesRemake ? ' (리메이크)' : '')));
+  }
+  add('매체', reportEsc((m.formats || []).join(', ')));
+  let discText = '';
+  if (l && !l.individual) {
+    const cs = l.contents || [];
+    if ((l.disc || 1) > 1 || l.note || cs.some(c => c !== 'main')) {
+      discText = 'Disc ' + (l.disc || 1) + (cs.length ? ' · ' + cs.map(contentLabel).join(', ') : '') + (l.note ? ' (' + l.note + ')' : '');
+      add('디스크', reportEsc(discText));
+    }
+  }
+  add('줄거리', m.synopsis ? '<span class="syn">' + reportEsc(m.synopsis) + '</span>' : '');
+  add('태그', reportEsc((m.hashtags || []).map(t => '#' + t).join(' ')));
+  add('메모', m.notes ? '<span class="syn">' + reportEsc(m.notes) + '</span>' : '');
+  const rating = Number(m.rating) > 0 ? '<span class="rate">★ ' + Number(m.rating) + ' / 5</span>' : '';
+  const badges = (m.favorite ? '<span class="heart">♥</span>' : '') + (m.status === 'wishlist' ? '<span class="tag wish">미보유</span>' : '');
+  const poster = opts.withPoster && m.posterUrl
+    ? '<img class="poster" loading="lazy" alt="" src="' + reportEsc(m.posterUrl) + '">'
+    : '<div class="poster ph"></div>';
+  const q = [m.titleKr, m.titleOriginal, m.year, countries.join(' '), genres.join(' '), m.director, (m.actors || []).join(' '),
+    m.seriesName, (m.hashtags || []).join(' '), m.notes, m.synopsis, (m.formats || []).join(' '), discText,
+    l && !l.individual ? l.section + ' ' + l.categoryName : ''].join(' ').toLowerCase();
+  return '<article class="entry" data-q="' + reportEsc(q) + '">' + poster +
+    '<div class="info"><h4>' + reportEsc(m.titleKr || '제목 없음') +
+    (m.titleOriginal ? ' <span class="orig">' + reportEsc(m.titleOriginal) + '</span>' : '') + ' ' + rating + ' ' + badges + '</h4>' +
+    (meta ? '<div class="meta">' + reportEsc(meta) + '</div>' : '') +
+    '<dl>' + rows.join('') + '</dl></div></article>';
+}
+function buildReportHtml(movies, settings, opts) {
+  const d = new Date();
+  const today = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const byKey = new Map();
+  const noLoc = [];
+  const indiv = [];
+  const indivSeen = new Set();
+  movies.forEach(m => {
+    const ls = getLocations(m);
+    if (ls.length === 0) { noLoc.push(m); return; }
+    ls.forEach(l => {
+      if (l.individual) {
+        if (!indivSeen.has(m.id)) { indivSeen.add(m.id); indiv.push(m); }
+        return;
+      }
+      const key = catKey(l);
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push({ m, l });
+    });
+  });
+  const byTitle = (a, b) => String(a.titleKr || '').localeCompare(String(b.titleKr || ''), 'ko');
+  const discSlots = new Set();
+  byKey.forEach((es, key) => es.forEach(e => discSlots.add(key + '|' + e.l.itemNumber)));
+  const toc = [];
+  let uidn = 0;
+  const nextId = p => p + (uidn++);
+
+  const catBlock = (id, title, desc, entries) => {
+    const slots = new Map();
+    entries.slice().sort((a, b) => (Number(a.l.itemNumber) || 0) - (Number(b.l.itemNumber) || 0) || (a.l.disc || 1) - (b.l.disc || 1)).forEach(e => {
+      const k = String(e.l.itemNumber == null ? '' : e.l.itemNumber);
+      if (!slots.has(k)) slots.set(k, []);
+      slots.get(k).push(e);
+    });
+    const movieCount = new Set(entries.map(e => e.m.id)).size;
+    let h = '<section class="cat" id="' + id + '"><h3>' + reportEsc(title) + ' <small>' + slots.size + '장 · ' + movieCount + '편</small></h3>';
+    if (desc) h += '<p class="cat-desc">' + reportEsc(desc) + '</p>';
+    slots.forEach((es, k) => {
+      const ids = new Set(es.map(e => e.m.id));
+      h += '<div class="slot"><div class="slot-h">' + (k ? reportEsc(k) + '번 칸' : '번호 미지정') +
+        (ids.size > 1 ? ' <span class="shared">한 디스크에 ' + ids.size + '편 수록</span>' : '') + '</div>';
+      es.forEach(e => { h += reportEntry(e.m, e.l, opts, es.length); });
+      h += '</div>';
+    });
+    return h + '</section>';
+  };
+
+  const used = new Set();
+  let body = '';
+  REGIONS.forEach(r => {
+    let regionHtml = '';
+    const regionToc = [];
+    sectionsOfRegion(settings, r).forEach(sec => {
+      let secHtml = '';
+      const secId = nextId('s');
+      const secToc = [];
+      settings.categories.filter(c => c.section === sec.name).sort((a, b) => a.number - b.number).forEach(c => {
+        const key = sec.name + '|' + c.name + '|' + String(c.number == null ? '' : c.number);
+        const es = byKey.get(key);
+        if (!es) return;
+        used.add(key);
+        const cid = nextId('c');
+        secToc.push({ level: 3, id: cid, text: '(' + c.number + ') ' + c.name });
+        secHtml += catBlock(cid, '(' + c.number + ') ' + c.name, c.description || '', es);
+      });
+      if (secHtml) {
+        regionToc.push({ level: 2, id: secId, text: sec.name });
+        secToc.forEach(t => regionToc.push(t));
+        regionHtml += '<div class="sec" id="' + secId + '"><h2>' + reportEsc(sec.name) + '</h2>' + secHtml + '</div>';
+      }
+    });
+    if (regionHtml) {
+      const rid = nextId('r');
+      body += '<div class="region" id="' + rid + '"><h1>' + reportEsc(r) + '</h1>' + regionHtml + '</div>';
+      toc.push({ level: 0, id: rid, text: r });
+      regionToc.forEach(t => toc.push(t));
+    }
+  });
+  const leftover = [];
+  byKey.forEach((es, key) => { if (!used.has(key)) leftover.push({ key, es }); });
+  if (leftover.length) {
+    const lid = nextId('x');
+    let h = '<div class="region" id="' + lid + '"><h1>위치 정리 필요</h1><p class="cat-desc">현재 설정에 없는 섹션·카테고리에 등록된 영화예요.</p>';
+    leftover.forEach(({ es }) => {
+      const l0 = es[0].l;
+      h += catBlock(nextId('c'), l0.section + ' › (' + l0.categoryNumber + ') ' + l0.categoryName, '', es);
+    });
+    body += h + '</div>';
+    toc.push({ level: 0, id: lid, text: '위치 정리 필요' });
+  }
+  if (indiv.length) {
+    const iid = nextId('i');
+    let h = '<div class="region" id="' + iid + '"><h1>개별 보관</h1><section class="cat"><h3>개별 보관 <small>' + indiv.length + '편</small></h3><div class="slot">';
+    indiv.slice().sort(byTitle).forEach(m => { h += reportEntry(m, null, opts, 1); });
+    body += h + '</div></section></div>';
+    toc.push({ level: 0, id: iid, text: '개별 보관' });
+  }
+  if (noLoc.length) {
+    const nid = nextId('n');
+    let h = '<div class="region" id="' + nid + '"><h1>보관 위치 없음</h1><section class="cat"><h3>보관 위치 없음 <small>' + noLoc.length + '편</small></h3><div class="slot">';
+    noLoc.slice().sort(byTitle).forEach(m => { h += reportEntry(m, null, opts, 1); });
+    body += h + '</div></section></div>';
+    toc.push({ level: 0, id: nid, text: '보관 위치 없음' });
+  }
+
+  const tocHtml = toc.length === 0 ? '' :
+    '<nav class="toc"><b>바로가기</b> ' + toc.map(t => '<a class="l' + t.level + '" href="#' + t.id + '">' + reportEsc(t.text) + '</a>').join('') + '</nav>';
+  const owned = movies.filter(m => m.status !== 'wishlist').length;
+  const css = [
+    'body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif;color:#222;background:#faf8f3;line-height:1.55}',
+    'header{position:sticky;top:0;z-index:10;background:#2b2118;color:#f4ead7;padding:14px 22px;display:flex;flex-wrap:wrap;gap:8px 20px;align-items:center}',
+    'header h1{margin:0;font-size:18px}header .sum{font-size:13px;opacity:.85}',
+    '#q{margin-left:auto;min-width:260px;padding:8px 12px;border-radius:8px;border:none;font-size:14px}',
+    'main{max-width:980px;margin:0 auto;padding:18px 22px 60px}',
+    '.toc{display:flex;flex-wrap:wrap;gap:6px 10px;font-size:12.5px;margin:6px 0 20px;padding:12px 14px;background:#fff;border:1px solid #e6dfd0;border-radius:10px}',
+    '.toc a{color:#6b4b1f;text-decoration:none}.toc a.l0{font-weight:700;margin-left:6px}.toc a.l3{opacity:.8}',
+    '.region>h1{font-size:24px;margin:34px 0 4px;padding-bottom:6px;border-bottom:3px solid #b8892f}',
+    '.sec>h2{font-size:19px;margin:24px 0 6px;color:#6b4b1f}',
+    '.cat>h3{font-size:16px;margin:18px 0 4px}.cat>h3 small{font-weight:400;color:#8a7a62;margin-left:6px}',
+    '.cat-desc{margin:0 0 8px;font-size:12.5px;color:#8a7a62}',
+    '.slot{background:#fff;border:1px solid #e6dfd0;border-radius:10px;margin:10px 0;overflow:hidden;break-inside:avoid}',
+    '.slot-h{background:#f1e8d4;padding:6px 12px;font-size:12.5px;font-weight:700;color:#6b4b1f}',
+    '.shared{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:999px;background:#b8892f;color:#fff;font-weight:600;font-size:11.5px}',
+    '.entry{display:flex;gap:14px;padding:12px;border-top:1px solid #f0eadc}.slot-h+.entry{border-top:none}',
+    '.poster{flex:none;width:64px;height:92px;object-fit:cover;border-radius:4px;background:#e9e1cf}',
+    '.info{min-width:0;flex:1}.info h4{margin:0 0 2px;font-size:15px}',
+    '.orig{font-weight:400;color:#8a7a62;font-size:12.5px}.rate{color:#b8892f;font-size:13px;font-weight:600}.heart{color:#c0392b}',
+    '.tag{display:inline-block;padding:0 7px;border-radius:999px;font-size:11px;border:1px solid #bbb;color:#777}',
+    '.meta{font-size:12.5px;color:#6f6250;margin-bottom:4px}',
+    'dl{margin:0;display:grid;grid-template-columns:54px 1fr;gap:2px 10px;font-size:13px}dt{color:#8a7a62}dd{margin:0}',
+    '.syn{white-space:pre-wrap}.hide{display:none}',
+    '@media print{header{position:static;background:none;color:#000;padding:0 0 8px}#q,.toc{display:none}body{background:#fff}.entry{break-inside:avoid}}'
+  ].join('');
+  const js = [
+    "var q=document.getElementById('q');",
+    "function cnt(el){return el.querySelectorAll('.entry:not(.hide)').length;}",
+    "q.addEventListener('input',function(){",
+    "var t=q.value.trim().toLowerCase();",
+    "var es=document.querySelectorAll('.entry');",
+    "for(var i=0;i<es.length;i++){var ok=!t||es[i].getAttribute('data-q').indexOf(t)>=0;es[i].classList.toggle('hide',!ok);}",
+    "var gs=document.querySelectorAll('.slot,.cat,.sec,.region');",
+    "for(var j=0;j<gs.length;j++){gs[j].classList.toggle('hide',cnt(gs[j])===0);}",
+    "});"
+  ].join('');
+  return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<title>영화 컬렉션 ' + today + '</title><style>' + css + '</style></head><body>' +
+    '<header><h1>영화 컬렉션</h1><span class="sum">' + today + ' 기준 · 전체 ' + movies.length + '편 (보유 ' + owned + ' · 미보유 ' + (movies.length - owned) + ') · DVD ' + discSlots.size + '장</span>' +
+    '<input id="q" type="search" placeholder="문서 내 검색 (제목, 감독, 배우, 태그…)"></header>' +
+    '<main>' + tocHtml + body + '</main>' + '<scr' + 'ipt>' + js + '<' + '/script></body></html>';
+}
+function buildCsv(movies, settings) {
+  const secMap = new Map(settings.sections.map(s => [s.name, s]));
+  const header = ['구분', '섹션', '카테고리번호', '카테고리', '칸번호', '디스크', '디스크내용', '함께수록', '제목', '원제', '연도', '국가', '장르', '상영시간', '관람등급', '감독', '출연', '별점', '하트', '보유상태', '매체', '시리즈', '시리즈순서', '해시태그', '메모', '줄거리'];
+  const rows = [];
+  movies.forEach(m => {
+    const ls = getLocations(m);
+    const base = [m.titleKr, m.titleOriginal, m.year, reportList(m.countries, m.country).join(', '), reportList(m.genres, m.genre).join(', '),
+      m.runtime, m.ageRating, m.director, (m.actors || []).join(', '), m.rating || '', m.favorite ? '♥' : '', m.status === 'wishlist' ? '미보유' : '보유',
+      (m.formats || []).join(', '), m.seriesName || '', m.seriesName ? m.seriesOrder : '', (m.hashtags || []).map(t => '#' + t).join(' '), m.notes, m.synopsis];
+    const mk = (loc, sortKey) => {
+      let head;
+      if (!loc) head = ['보관 위치 없음', '', '', '', '', '', '', ''];
+      else if (loc.individual) head = ['개별 보관', '', '', '', '', '', '', ''];
+      else {
+        const sec = secMap.get(loc.section);
+        head = [sec ? sectionRegion(sec) : '', loc.section, loc.categoryNumber, loc.categoryName, loc.itemNumber, loc.disc || 1,
+          (loc.contents || []).map(contentLabel).join(', ') + (loc.note ? ' (' + loc.note + ')' : ''), loc.shared ? '예' : ''];
+      }
+      rows.push({ sortKey, cells: head.concat(base) });
+    };
+    if (ls.length === 0) { mk(null, [99, 0, 0, 0, 0, m.titleKr || '']); return; }
+    ls.forEach(l => {
+      if (l.individual) { mk(l, [98, 0, 0, 0, 0, m.titleKr || '']); return; }
+      const sec = secMap.get(l.section);
+      const ri = sec ? Math.max(0, REGIONS.indexOf(sectionRegion(sec))) : 90;
+      mk(l, [ri, sec ? Number(sec.number) || 0 : 0, Number(l.categoryNumber) || 0, Number(l.itemNumber) || 0, l.disc || 1, m.titleKr || '']);
+    });
+  });
+  rows.sort((a, b) => {
+    for (let i = 0; i < 5; i++) { if (a.sortKey[i] !== b.sortKey[i]) return a.sortKey[i] - b.sortKey[i]; }
+    return String(a.sortKey[5]).localeCompare(String(b.sortKey[5]), 'ko');
+  });
+  const CR = String.fromCharCode(13);
+  const LF = String.fromCharCode(10);
+  const cell = v => '"' + String(v == null ? '' : v).split(CR).join('').split(LF).join(' ').split('"').join('""') + '"';
+  const lines = [header.map(cell).join(',')].concat(rows.map(r => r.cells.map(cell).join(',')));
+  return String.fromCharCode(0xFEFF) + lines.join(CR + LF);
+}
+function ExportModal({ movies, settings, onClose }) {
+  const [format, setFormat] = useState('html');
+  const [includeWishlist, setIncludeWishlist] = useState(true);
+  const [withPoster, setWithPoster] = useState(true);
+  const list = includeWishlist ? movies : movies.filter(m => m.status !== 'wishlist');
+  function handleDownload() {
+    const d = new Date();
+    const stamp = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    let blob;
+    let name;
+    if (format === 'html') {
+      blob = new Blob([buildReportHtml(list, settings, { withPoster })], { type: 'text/html;charset=utf-8' });
+      name = '영화컬렉션_' + stamp + '.html';
+    } else {
+      blob = new Blob([buildCsv(list, settings)], { type: 'text/csv;charset=utf-8' });
+      name = '영화컬렉션_' + stamp + '.csv';
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  }
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <div className="drawer" onClick={e => e.stopPropagation()}>
+        <div className="drawer__head">
+          <h2>문서로 내보내기</h2>
+          <button type="button" className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="drawer__body">
+          <div className="field">
+            <span>형식</span>
+            <div className="segmented">
+              <button type="button" className={format === 'html' ? 'is-active' : ''} onClick={() => setFormat('html')}>보기용 문서 (HTML)</button>
+              <button type="button" className={format === 'csv' ? 'is-active' : ''} onClick={() => setFormat('csv')}>표 (CSV)</button>
+            </div>
+            <p className="hint-text-small">
+              {format === 'html'
+                ? '위치별(외화/한국 › 섹션 › 카테고리 › 칸 번호)로 정리한 문서예요. 더블클릭하면 맥의 Safari·Chrome에서 바로 열리고, 상단 검색창이나 ⌘F로 문서 안을 검색할 수 있어요. 인쇄 → PDF로 저장도 가능해요.'
+                : '영화·디스크 한 줄씩 정리한 표예요. 맥의 Numbers·엑셀에서 한글이 깨지지 않도록 저장돼요. 정렬·필터가 필요할 때 쓰세요.'}
+            </p>
+          </div>
+          <label className="checkbox-row">
+            <input type="checkbox" checked={includeWishlist} onChange={e => setIncludeWishlist(e.target.checked)} />
+            미보유(위시리스트) 영화도 포함
+          </label>
+          {format === 'html' && (
+            <label className="checkbox-row">
+              <input type="checkbox" checked={withPoster} onChange={e => setWithPoster(e.target.checked)} />
+              포스터 이미지 포함 (보려면 인터넷 연결이 필요해요)
+            </label>
+          )}
+          <p className="hint-text-small">내보낼 영화: {list.length}편 (등록된 최종 정보 기준)</p>
+        </div>
+        <div className="drawer__foot">
+          <div className="drawer__foot-actions">
+            <button type="button" className="btn btn--ghost" onClick={onClose}>닫기</button>
+            <button type="button" className="btn btn--primary" onClick={handleDownload} disabled={list.length === 0}><DownloadIcon size={14} /> 다운로드</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SeriesExpandedGalleryBlock({ entry, onEdit, onToggle }) {
   return (
     <div className="series-expanded-gallery-block">
@@ -3102,6 +3402,7 @@ function MovieCollectionApp() {
   const [slotAddContext, setSlotAddContext] = useState(null);
   const [detailId, setDetailId] = useState(null);
   const [editPick, setEditPick] = useState(null);
+  const [exportOpen, setExportOpen] = useState(false);
   const [repairOpen, setRepairOpen] = useState(false);
   const detailMovie = detailId ? movies.find(m => m.id === detailId) || null : null;
   const orphanGroups = useMemo(() => findOrphanGroups(movies, settings), [movies, settings]);
@@ -3529,7 +3830,6 @@ function MovieCollectionApp() {
     setFormOpen(true);
   }
 
-  // 같은 디스크(같은 칸)에 다른 영화가 함께 있으면, 편집할 영화를 먼저 고르게 한다.
   function handleEditRequest(mv) {
     const co = [];
     getLocations(mv).filter(l => !l.individual).forEach(l => {
@@ -3890,6 +4190,9 @@ function MovieCollectionApp() {
             <input placeholder="제목, 감독, 배우, 태그로 검색" value={search} onChange={e => { setSearch(e.target.value); setActiveFilter(null); }} />
           </div>
           <SaveStatus saving={saving} />
+          <button type="button" className="icon-only-btn" onClick={() => setExportOpen(true)} title="문서로 내보내기">
+            <DownloadIcon size={16} />
+          </button>
           {shelfModeOn && (
             <button type="button" className="icon-only-btn" onClick={() => setSettingsOpen(true)} title="설정">
               <SettingsIcon size={16} />
@@ -4006,6 +4309,10 @@ function MovieCollectionApp() {
           </div>
         )}
       </main>
+
+      {exportOpen && (
+        <ExportModal movies={movies} settings={settings} onClose={() => setExportOpen(false)} />
+      )}
 
       {repairOpen && (
         <LocationRepairModal
