@@ -2190,108 +2190,6 @@ function PosterMovieTile({ movie, onEdit, focusLoc, sharedCount }) {
   );
 }
 
-function MovieDetailModal({ movie, onClose, onEdit, onFilter, onAddToDisc }) {
-  const locs = getLocations(movie);
-  const countries = movie.countries || (movie.country ? [movie.country] : []);
-  const genres = movie.genres || (movie.genre ? [movie.genre] : []);
-  const metaLine = [movie.year, movie.runtime ? `${movie.runtime}분` : '', movie.ageRating, countries.join(', '), genres.join(', ')].filter(Boolean).join(' · ');
-  return (
-    <div className="drawer-backdrop" onClick={onClose}>
-      <div className="drawer" onClick={e => e.stopPropagation()}>
-        <div className="drawer__head">
-          <h2>영화 정보</h2>
-          <button type="button" className="icon-btn" onClick={onClose}><X size={18} /></button>
-        </div>
-        <div className="drawer__body">
-          <div className="detail-head">
-            <Poster url={movie.posterUrl} size="lg" />
-            <div className="detail-title">
-              <h3>{movie.titleKr}</h3>
-              {movie.titleOriginal && <span className="detail-sub">{movie.titleOriginal}</span>}
-              {metaLine && <span className="detail-sub">{metaLine}</span>}
-              <span><StarRating value={movie.rating} readOnly size={15} /></span>
-              <span><HeartButton movie={movie} size={18} /></span>
-            </div>
-          </div>
-
-          {movie.seriesName && (
-            <div className="detail-section">
-              <span className="detail-label">시리즈</span>
-              <span className="detail-text">{movie.seriesName}{movie.seriesOrder !== '' && movie.seriesOrder != null ? ` #${movie.seriesOrder}` : ''}{movie.seriesUnofficial ? ' (비공식)' : ''}{movie.seriesRemake ? ' (리메이크)' : ''}</span>
-            </div>
-          )}
-          {movie.director && (
-            <div className="detail-section">
-              <span className="detail-label">감독</span>
-              <span className="detail-text">{movie.director}</span>
-            </div>
-          )}
-          {movie.actors && movie.actors.length > 0 && (
-            <div className="detail-section">
-              <span className="detail-label">출연</span>
-              <span className="detail-text">{movie.actors.join(', ')}</span>
-            </div>
-          )}
-          {movie.synopsis && (
-            <div className="detail-section">
-              <span className="detail-label">줄거리</span>
-              <span className="detail-text">{movie.synopsis}</span>
-            </div>
-          )}
-          {(movie.formats && movie.formats.length > 0) && (
-            <div className="detail-section">
-              <span className="detail-label">매체</span>
-              <div className="detail-tags">{movie.formats.map(f => <span key={f} className="format-tag">{f}</span>)}</div>
-            </div>
-          )}
-          {locs.length > 0 && (
-            <div className="detail-section">
-              <span className="detail-label">보관 위치</span>
-              {locs.map((l, i) => (
-                <div key={i} className="detail-loc">
-                  <span className="location-tag"><MapPin size={12} />{locationText(l)}</span>
-                  <DiscBadge loc={l} total={locs.length} />
-                  {l.shared && <span className="shared-badge">다른 영화와 한 디스크</span>}
-                  {l.note && <span className="detail-sub">{l.note}</span>}
-                  {!l.individual && onAddToDisc && (
-                    <button
-                      type="button"
-                      className="link-btn"
-                      onClick={() => onAddToDisc({ section: l.section, categoryName: l.categoryName, categoryNumber: l.categoryNumber, itemNumber: l.itemNumber })}
-                    >
-                      + 이 디스크에 영화 추가
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-          {movie.hashtags && movie.hashtags.length > 0 && (
-            <div className="detail-section">
-              <span className="detail-label">비고 해시태그</span>
-              <div className="detail-tags">
-                {movie.hashtags.map(t => <button type="button" key={t} className="tag-link" onClick={() => { onClose(); onFilter && onFilter('tag', t); }}>#{t}</button>)}
-              </div>
-            </div>
-          )}
-          {movie.notes && (
-            <div className="detail-section">
-              <span className="detail-label">메모</span>
-              <span className="detail-text">{movie.notes}</span>
-            </div>
-          )}
-        </div>
-        <div className="drawer__foot">
-          <div className="drawer__foot-actions">
-            <button type="button" className="btn btn--ghost" onClick={onClose}>닫기</button>
-            <button type="button" className="btn btn--primary" onClick={() => onEdit(movie)}><Pencil size={14} /> 편집</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function reportEsc(v) {
   return String(v == null ? '' : v).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;').split('"').join('&quot;');
 }
@@ -2337,11 +2235,12 @@ function reportShelfEntry(m, l, secMap, opts) {
   const disc = hasDisc ? 'Disc ' + (l.disc || 1) + (cs.length ? ' · ' + cs.map(contentLabel).join(', ') : '') + (l.note ? ' (' + l.note + ')' : '') : '';
   const sub = [m.year, m.director].filter(Boolean).join(' · ');
   const rate = Number(m.rating) > 0 ? '<span class="rate">★ ' + Number(m.rating) + '</span>' : '';
+  const series = m.seriesName ? '시리즈: ' + m.seriesName + (m.seriesOrder !== '' && m.seriesOrder != null ? ' #' + m.seriesOrder : '') : '';
   return '<div class="entry" data-q="' + reportEsc(reportQuery(m, reportLocText(l, secMap))) + '">' + reportPoster(m, opts, 'sp') +
     '<div class="si"><div class="st">' + reportEsc(m.titleKr || '제목 없음') +
     (m.titleOriginal ? ' <span class="orig">' + reportEsc(m.titleOriginal) + '</span>' : '') + ' ' + rate +
     (m.favorite ? ' <span class="heart">♥</span>' : '') + (m.status === 'wishlist' ? ' <span class="pill">미보유</span>' : '') + '</div>' +
-    (sub || disc ? '<div class="ss">' + reportEsc([sub, disc].filter(Boolean).join('  |  ')) + '</div>' : '') + '</div></div>';
+    ([sub, series, disc].filter(Boolean).length ? '<div class="ss">' + reportEsc([sub, series, disc].filter(Boolean).join('  |  ')) + '</div>' : '') + '</div></div>';
 }
 function reportRow(m, secMap, opts) {
   const countries = reportList(m.countries, m.country);
@@ -2350,7 +2249,15 @@ function reportRow(m, secMap, opts) {
   const grp = new Set();
   const locTexts = [];
   const locShorts = [];
-  if (ls.length === 0) grp.add('없음');
+  const hasPhys = ls.length > 0;
+  if (!hasPhys) {
+    const plats = (m.formats && m.formats.length) ? m.formats : [];
+    grp.add('플랫폼');
+    locTexts.push(plats.length ? plats.join(', ') + ' (플랫폼)' : '플랫폼 미등록');
+    locShorts.push(plats.length
+      ? '<span class="lt">' + reportEsc(plats.join(', ')) + '</span>'
+      : '<span class="lt">플랫폼 미등록</span>');
+  }
   ls.forEach(l => {
     locTexts.push(reportLocText(l, secMap));
     locShorts.push(reportLocShort(l, secMap));
@@ -2362,18 +2269,24 @@ function reportRow(m, secMap, opts) {
   const yearNum = parseInt(m.year, 10) || 0;
   const rateNum = Number(m.rating) > 0 ? Number(m.rating) : 0;
   const sub = [m.year, m.director].filter(Boolean).join(' · ');
+  const seriesBits = [];
+  if (m.seriesName) {
+    seriesBits.push(m.seriesName + (m.seriesOrder !== '' && m.seriesOrder != null ? ' #' + m.seriesOrder : '') +
+      (m.seriesUnofficial ? ' (비공식)' : '') + (m.seriesRemake ? ' (리메이크)' : ''));
+  }
+  const seriesLine = seriesBits.join(' · ');
   const rows = [];
   const add = (k, v) => { if (v) rows.push('<dt>' + k + '</dt><dd>' + v + '</dd>'); };
   add('국가·장르', reportEsc([countries.join(', '), genres.join(', ')].filter(Boolean).join(' · ')));
   add('상영·등급', reportEsc([m.runtime ? m.runtime + '분' : '', m.ageRating].filter(Boolean).join(' · ')));
   add('출연', reportEsc((m.actors || []).join(', ')));
   if (m.seriesName) {
-    add('시리즈', reportEsc(m.seriesName + (m.seriesOrder !== '' && m.seriesOrder != null ? ' #' + m.seriesOrder : '') + (m.seriesUnofficial ? ' (비공식)' : '') + (m.seriesRemake ? ' (리메이크)' : '')));
+    add('시리즈', reportEsc(seriesLine));
   }
   add('줄거리', m.synopsis ? '<span class="pre">' + reportEsc(m.synopsis) + '</span>' : '');
   add('태그', reportEsc((m.hashtags || []).map(t => '#' + t).join(' ')));
   add('메모', m.notes ? '<span class="pre">' + reportEsc(m.notes) + '</span>' : '');
-  const locHtml = locShorts.length ? locShorts.join('<br>') : '<span class="lt">보관 위치 없음</span>';
+  const locHtml = locShorts.join('<br>');
   return '<details class="mv" data-title="' + reportEsc(m.titleKr || '') + '" data-year="' + yearNum + '" data-rate="' + rateNum +
     '" data-fmt="' + reportEsc(fm.join('|')) + '" data-grp="' + Array.from(grp).join('|') + '" data-own="' + (m.status === 'wishlist' ? '0' : '1') +
     '" data-fav="' + (m.favorite ? '1' : '0') + '" data-q="' + reportEsc(reportQuery(m, locTexts.join(' '))) + '">' +
@@ -2382,6 +2295,7 @@ function reportRow(m, secMap, opts) {
     (m.titleOriginal ? ' <span class="orig">' + reportEsc(m.titleOriginal) + '</span>' : '') +
     (m.favorite ? ' <span class="heart">♥</span>' : '') + (m.status === 'wishlist' ? ' <span class="pill">미보유</span>' : '') + '</div>' +
     (sub ? '<div class="ms">' + reportEsc(sub) + '</div>' : '') +
+    (seriesLine ? '<div class="ms ms--series">시리즈: ' + reportEsc(seriesLine) + '</div>' : '') +
     '<div class="ml">' + locHtml + '</div></div>' +
     '<div class="mr">' + (rateNum ? '<span class="rate">★ ' + rateNum + '</span>' : '') +
     '<div class="fm">' + fm.map(f => '<span class="pill">' + reportEsc(f) + '</span>').join('') + '</div></div></summary>' +
@@ -2395,7 +2309,7 @@ function buildReportHtml(movies, settings, opts) {
   const sorted = movies.slice().sort(byTitle);
 
   const fmtCount = new Map();
-  const grpCount = { '외화': 0, '한국': 0, '개별': 0, '없음': 0 };
+  const grpCount = { '외화': 0, '한국': 0, '개별': 0, '플랫폼': 0 };
   const byKey = new Map();
   const discSlots = new Set();
   const indiv = [];
@@ -2403,7 +2317,7 @@ function buildReportHtml(movies, settings, opts) {
     (m.formats && m.formats.length ? m.formats : ['미분류']).forEach(f => fmtCount.set(f, (fmtCount.get(f) || 0) + 1));
     const ls = getLocations(m);
     const g = new Set();
-    if (ls.length === 0) g.add('없음');
+    if (ls.length === 0) g.add('플랫폼');
     ls.forEach(l => {
       if (l.individual) { g.add('개별'); if (!indiv.includes(m)) indiv.push(m); return; }
       const sec = secMap.get(l.section);
@@ -2423,7 +2337,7 @@ function buildReportHtml(movies, settings, opts) {
   const frow = (label, inner) => '<div class="frow"><span class="fl">' + label + '</span><div class="chips">' + inner + '</div></div>';
   const fbar = '<div class="fbar">' +
     frow('매체', fmtList.map(([f, n]) => chip('fmt', f, f, n)).join('')) +
-    frow('보관', [['외화', '외화'], ['한국', '한국'], ['개별', '개별 보관'], ['없음', '위치 없음']].filter(x => grpCount[x[0]] > 0).map(x => chip('grp', x[0], x[1], grpCount[x[0]])).join('')) +
+    frow('보관', [['외화', '외화'], ['한국', '한국'], ['개별', '개별 보관'], ['플랫폼', '플랫폼']].filter(x => grpCount[x[0]] > 0).map(x => chip('grp', x[0], x[1], grpCount[x[0]])).join('')) +
     frow('상태', chip('st', 'own', '보유', owned) + chip('st', 'wish', '미보유', movies.length - owned) + chip('st', 'fav', '♥ 하트')) +
     frow('정렬', chip('sort', 'title', '제목순', null, true) + chip('sort', 'year-desc', '연도 최신순') + chip('sort', 'year-asc', '연도 오래된순') +
       chip('sort', 'rate-desc', '별점 높은순') + chip('sort', 'rate-asc', '별점 낮은순')) +
@@ -2532,7 +2446,7 @@ function buildReportHtml(movies, settings, opts) {
     '.mv>summary::-webkit-details-marker{display:none}.mv>summary:hover{background:#fbf9f3}.mv[open]>summary{background:#fbf9f3}',
     '.po{flex:none;width:44px;height:64px;object-fit:cover;border-radius:4px;background:#ece6d6}',
     '.mm{flex:1;min-width:0}.mt{font-size:15px;font-weight:700}.orig{font-weight:400;color:var(--mute);font-size:12.5px;margin-left:4px}',
-    '.ms{font-size:12.5px;color:#6a6458}.ml{font-size:12px;color:var(--mute);margin-top:1px}',
+    '.ms{font-size:12.5px;color:#6a6458}.ms--series{color:#8a5a1f;font-weight:600}.ml{font-size:12px;color:var(--mute);margin-top:1px}',
     '.rg{display:inline-block;margin-right:4px;padding:0 6px;border-radius:4px;background:#efe9db;color:var(--acc);font-size:11px}',
     '.mr{flex:none;text-align:right;display:flex;flex-direction:column;gap:4px;align-items:flex-end}',
     '.rate{color:#b8892f;font-weight:700;font-size:13px}.heart{color:#c0392b}.fm{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}',
@@ -2642,7 +2556,7 @@ function buildCsv(movies, settings) {
       (m.formats || []).join(', '), m.seriesName || '', m.seriesName ? m.seriesOrder : '', (m.hashtags || []).map(t => '#' + t).join(' '), m.notes, m.synopsis];
     const mk = (loc, sortKey) => {
       let head;
-      if (!loc) head = ['보관 위치 없음', '', '', '', '', '', '', ''];
+      if (!loc) head = ['플랫폼', '', '', '', '', '', '', ''];
       else if (loc.individual) head = ['개별 보관', '', '', '', '', '', '', ''];
       else {
         const sec = secMap.get(loc.section);
@@ -2651,7 +2565,7 @@ function buildCsv(movies, settings) {
       }
       rows.push({ sortKey, cells: head.concat(base) });
     };
-    if (ls.length === 0) { mk(null, [99, 0, 0, 0, 0, m.titleKr || '']); return; }
+    if (ls.length === 0) { mk(null, [97, 0, 0, 0, 0, m.titleKr || '']); return; }
     ls.forEach(l => {
       if (l.individual) { mk(l, [98, 0, 0, 0, 0, m.titleKr || '']); return; }
       const sec = secMap.get(l.section);
@@ -2710,7 +2624,7 @@ function ExportModal({ movies, settings, onClose }) {
             </div>
             <p className="hint-text-small">
               {format === 'html'
-                ? '「전체 목록」(매체·보관·상태 필터, 정렬)과 「DVD 보관함」(외화 / 한국 / 개별 보관 목차와 칸별 정리) 두 탭으로 구성돼요. 더블클릭하면 맥의 Safari·Chrome에서 바로 열리고, 상단 검색창이나 ⌘F로 검색할 수 있어요. 영화를 누르면 줄거리·출연 등 상세가 펼쳐져요. 인쇄 → PDF 저장도 가능해요.'
+                ? '「전체 목록」(매체·보관·상태 필터, 정렬)과 「DVD 보관함」(외화 / 한국 / 개별 보관 목차와 칸별 정리) 두 탭으로 구성돼요. DVD가 아닌 영화는 매체·구매 플랫폼을 보관 위치로 표시해요. 더블클릭하면 맥의 Safari·Chrome에서 바로 열리고, 상단 검색창이나 ⌘F로 검색할 수 있어요. 영화를 누르면 줄거리·출연 등 상세가 펼쳐져요. 인쇄 → PDF 저장도 가능해요.'
                 : '영화·디스크 한 줄씩 정리한 표예요. 맥의 Numbers·엑셀에서 한글이 깨지지 않도록 저장돼요. 정렬·필터가 필요할 때 쓰세요.'}
             </p>
           </div>
@@ -2730,6 +2644,108 @@ function ExportModal({ movies, settings, onClose }) {
           <div className="drawer__foot-actions">
             <button type="button" className="btn btn--ghost" onClick={onClose}>닫기</button>
             <button type="button" className="btn btn--primary" onClick={handleDownload} disabled={list.length === 0}><DownloadIcon size={14} /> 다운로드</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MovieDetailModal({ movie, onClose, onEdit, onFilter, onAddToDisc }) {
+  const locs = getLocations(movie);
+  const countries = movie.countries || (movie.country ? [movie.country] : []);
+  const genres = movie.genres || (movie.genre ? [movie.genre] : []);
+  const metaLine = [movie.year, movie.runtime ? `${movie.runtime}분` : '', movie.ageRating, countries.join(', '), genres.join(', ')].filter(Boolean).join(' · ');
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <div className="drawer" onClick={e => e.stopPropagation()}>
+        <div className="drawer__head">
+          <h2>영화 정보</h2>
+          <button type="button" className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="drawer__body">
+          <div className="detail-head">
+            <Poster url={movie.posterUrl} size="lg" />
+            <div className="detail-title">
+              <h3>{movie.titleKr}</h3>
+              {movie.titleOriginal && <span className="detail-sub">{movie.titleOriginal}</span>}
+              {metaLine && <span className="detail-sub">{metaLine}</span>}
+              <span><StarRating value={movie.rating} readOnly size={15} /></span>
+              <span><HeartButton movie={movie} size={18} /></span>
+            </div>
+          </div>
+
+          {movie.seriesName && (
+            <div className="detail-section">
+              <span className="detail-label">시리즈</span>
+              <span className="detail-text">{movie.seriesName}{movie.seriesOrder !== '' && movie.seriesOrder != null ? ` #${movie.seriesOrder}` : ''}{movie.seriesUnofficial ? ' (비공식)' : ''}{movie.seriesRemake ? ' (리메이크)' : ''}</span>
+            </div>
+          )}
+          {movie.director && (
+            <div className="detail-section">
+              <span className="detail-label">감독</span>
+              <span className="detail-text">{movie.director}</span>
+            </div>
+          )}
+          {movie.actors && movie.actors.length > 0 && (
+            <div className="detail-section">
+              <span className="detail-label">출연</span>
+              <span className="detail-text">{movie.actors.join(', ')}</span>
+            </div>
+          )}
+          {movie.synopsis && (
+            <div className="detail-section">
+              <span className="detail-label">줄거리</span>
+              <span className="detail-text">{movie.synopsis}</span>
+            </div>
+          )}
+          {(movie.formats && movie.formats.length > 0) && (
+            <div className="detail-section">
+              <span className="detail-label">매체</span>
+              <div className="detail-tags">{movie.formats.map(f => <span key={f} className="format-tag">{f}</span>)}</div>
+            </div>
+          )}
+          {locs.length > 0 && (
+            <div className="detail-section">
+              <span className="detail-label">보관 위치</span>
+              {locs.map((l, i) => (
+                <div key={i} className="detail-loc">
+                  <span className="location-tag"><MapPin size={12} />{locationText(l)}</span>
+                  <DiscBadge loc={l} total={locs.length} />
+                  {l.shared && <span className="shared-badge">다른 영화와 한 디스크</span>}
+                  {l.note && <span className="detail-sub">{l.note}</span>}
+                  {!l.individual && onAddToDisc && (
+                    <button
+                      type="button"
+                      className="link-btn"
+                      onClick={() => onAddToDisc({ section: l.section, categoryName: l.categoryName, categoryNumber: l.categoryNumber, itemNumber: l.itemNumber })}
+                    >
+                      + 이 디스크에 영화 추가
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {movie.hashtags && movie.hashtags.length > 0 && (
+            <div className="detail-section">
+              <span className="detail-label">비고 해시태그</span>
+              <div className="detail-tags">
+                {movie.hashtags.map(t => <button type="button" key={t} className="tag-link" onClick={() => { onClose(); onFilter && onFilter('tag', t); }}>#{t}</button>)}
+              </div>
+            </div>
+          )}
+          {movie.notes && (
+            <div className="detail-section">
+              <span className="detail-label">메모</span>
+              <span className="detail-text">{movie.notes}</span>
+            </div>
+          )}
+        </div>
+        <div className="drawer__foot">
+          <div className="drawer__foot-actions">
+            <button type="button" className="btn btn--ghost" onClick={onClose}>닫기</button>
+            <button type="button" className="btn btn--primary" onClick={() => onEdit(movie)}><Pencil size={14} /> 편집</button>
           </div>
         </div>
       </div>
