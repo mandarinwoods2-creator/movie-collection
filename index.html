@@ -2304,10 +2304,22 @@ function reportLocText(l, secMap) {
   const region = sec ? sectionRegion(sec) : '';
   const cs = l.contents || [];
   const hasDisc = (l.disc || 1) > 1 || l.note || cs.some(c => c !== 'main');
-  return [region, l.section, '(' + l.categoryNumber + ') ' + l.categoryName].filter(Boolean).join(' › ') +
-    (l.itemNumber ? ' · ' + l.itemNumber + '번 칸' : '') +
+  return [region, l.section, '(' + l.categoryNumber + ') ' + l.categoryName].filter(Boolean).join(' ') +
+    (l.itemNumber ? ' ' + l.itemNumber + '번 칸' : '') +
+    (hasDisc ? ' Disc ' + (l.disc || 1) + (cs.length ? ' (' + cs.map(contentLabel).join(', ') + ')' : '') + (l.note ? ' ' + l.note : '') : '') +
+    (l.shared ? ' 함께 수록' : '');
+}
+function reportLocShort(l, secMap) {
+  if (l.individual) return '<span class="lt">개별 보관</span>';
+  const sec = secMap.get(l.section);
+  const region = sec ? sectionRegion(sec) : '';
+  const cs = l.contents || [];
+  const hasDisc = (l.disc || 1) > 1 || l.note || cs.some(c => c !== 'main');
+  const text = (sec && sec.number != null ? sec.number + '. ' : '') + l.section + ' (' + l.categoryNumber + ') ' + l.categoryName +
+    (l.itemNumber ? ' · ' + l.itemNumber + '번' : '') +
     (hasDisc ? ' · Disc ' + (l.disc || 1) + (cs.length ? ' (' + cs.map(contentLabel).join(', ') + ')' : '') + (l.note ? ' ' + l.note : '') : '') +
-    (l.shared ? ' · 한 디스크에 다른 영화와 함께 수록' : '');
+    (l.shared ? ' · 함께 수록' : '');
+  return (region ? '<b class="rg">' + reportEsc(region) + '</b> ' : '') + '<span class="lt">' + reportEsc(text) + '</span>';
 }
 function reportPoster(m, opts, cls) {
   return opts.withPoster && m.posterUrl
@@ -2337,9 +2349,11 @@ function reportRow(m, secMap, opts) {
   const ls = getLocations(m);
   const grp = new Set();
   const locTexts = [];
+  const locShorts = [];
   if (ls.length === 0) grp.add('없음');
   ls.forEach(l => {
     locTexts.push(reportLocText(l, secMap));
+    locShorts.push(reportLocShort(l, secMap));
     if (l.individual) { grp.add('개별'); return; }
     const sec = secMap.get(l.section);
     grp.add(sec ? sectionRegion(sec) : '없음');
@@ -2359,7 +2373,7 @@ function reportRow(m, secMap, opts) {
   add('줄거리', m.synopsis ? '<span class="pre">' + reportEsc(m.synopsis) + '</span>' : '');
   add('태그', reportEsc((m.hashtags || []).map(t => '#' + t).join(' ')));
   add('메모', m.notes ? '<span class="pre">' + reportEsc(m.notes) + '</span>' : '');
-  const locHtml = locTexts.length ? locTexts.map(t => reportEsc(t)).join('<br>') : '보관 위치 없음';
+  const locHtml = locShorts.length ? locShorts.join('<br>') : '<span class="lt">보관 위치 없음</span>';
   return '<details class="mv" data-title="' + reportEsc(m.titleKr || '') + '" data-year="' + yearNum + '" data-rate="' + rateNum +
     '" data-fmt="' + reportEsc(fm.join('|')) + '" data-grp="' + Array.from(grp).join('|') + '" data-own="' + (m.status === 'wishlist' ? '0' : '1') +
     '" data-fav="' + (m.favorite ? '1' : '0') + '" data-q="' + reportEsc(reportQuery(m, locTexts.join(' '))) + '">' +
@@ -2409,7 +2423,7 @@ function buildReportHtml(movies, settings, opts) {
   const frow = (label, inner) => '<div class="frow"><span class="fl">' + label + '</span><div class="chips">' + inner + '</div></div>';
   const fbar = '<div class="fbar">' +
     frow('매체', fmtList.map(([f, n]) => chip('fmt', f, f, n)).join('')) +
-    frow('보관', [['외화', '외화'], ['한국', '한국 영화'], ['개별', '개별 보관'], ['없음', '위치 없음']].filter(x => grpCount[x[0]] > 0).map(x => chip('grp', x[0], x[1], grpCount[x[0]])).join('')) +
+    frow('보관', [['외화', '외화'], ['한국', '한국'], ['개별', '개별 보관'], ['없음', '위치 없음']].filter(x => grpCount[x[0]] > 0).map(x => chip('grp', x[0], x[1], grpCount[x[0]])).join('')) +
     frow('상태', chip('st', 'own', '보유', owned) + chip('st', 'wish', '미보유', movies.length - owned) + chip('st', 'fav', '♥ 하트')) +
     frow('정렬', chip('sort', 'title', '제목순', null, true) + chip('sort', 'year-desc', '연도 최신순') + chip('sort', 'year-asc', '연도 오래된순') +
       chip('sort', 'rate-desc', '별점 높은순') + chip('sort', 'rate-asc', '별점 낮은순')) +
@@ -2419,7 +2433,7 @@ function buildReportHtml(movies, settings, opts) {
 
   let uidn = 0;
   const nextId = p => p + (uidn++);
-  const tocRows = [];
+  const tocByRegion = {};
   const catBlock = (id, title, desc, entries) => {
     const slots = new Map();
     entries.slice().sort((a, b) => (Number(a.l.itemNumber) || 0) - (Number(b.l.itemNumber) || 0) || (a.l.disc || 1) - (b.l.disc || 1)).forEach(e => {
@@ -2444,9 +2458,11 @@ function buildReportHtml(movies, settings, opts) {
   let shelf = '';
   REGIONS.forEach(r => {
     let regionHtml = '';
+    tocByRegion[r] = [];
     sectionsOfRegion(settings, r).forEach(sec => {
       let secHtml = '';
       const links = [];
+      const secTitle = (sec.number != null ? sec.number + '. ' : '') + sec.name;
       settings.categories.filter(c => c.section === sec.name).sort((a, b) => a.number - b.number).forEach(c => {
         const key = sec.name + '|' + c.name + '|' + String(c.number == null ? '' : c.number);
         const es = byKey.get(key);
@@ -2457,11 +2473,11 @@ function buildReportHtml(movies, settings, opts) {
         secHtml += catBlock(cid, '(' + c.number + ') ' + c.name, c.description || '', es);
       });
       if (secHtml) {
-        tocRows.push('<div class="trow"><b>' + reportEsc(r) + ' › ' + reportEsc(sec.name) + '</b><span>' + links.join('') + '</span></div>');
-        regionHtml += '<div class="sec"><h2>' + reportEsc(sec.name) + '</h2>' + secHtml + '</div>';
+        tocByRegion[r].push('<div class="tr"><span class="tn">' + reportEsc(sec.number != null ? sec.number + '.' : '') + '</span><b>' + reportEsc(sec.name) + '</b><span class="tl">' + links.join('') + '</span></div>');
+        regionHtml += '<div class="sec"><h2>' + reportEsc(secTitle) + '</h2>' + secHtml + '</div>';
       }
     });
-    if (regionHtml) shelf += '<div class="region"><h1>' + reportEsc(r === '한국' ? '한국 영화' : r) + '</h1>' + regionHtml + '</div>';
+    if (regionHtml) shelf += '<div class="region"><h1>' + reportEsc(r) + '</h1>' + regionHtml + '</div>';
   });
   const leftover = [];
   byKey.forEach((es, key) => { if (!used.has(key)) leftover.push(es); });
@@ -2469,11 +2485,21 @@ function buildReportHtml(movies, settings, opts) {
     let h = '<div class="region"><h1>위치 정리 필요</h1><p class="cdesc">현재 설정에 없는 섹션·카테고리에 등록된 영화예요.</p>';
     leftover.forEach(es => {
       const l0 = es[0].l;
-      h += catBlock(nextId('c'), l0.section + ' › (' + l0.categoryNumber + ') ' + l0.categoryName, '', es);
+      h += catBlock(nextId('c'), l0.section + ' (' + l0.categoryNumber + ') ' + l0.categoryName, '', es);
     });
     shelf += h + '</div>';
   }
-  const shelfEmpty = shelf === '' ? '<p class="mute">DVD 보관함에 등록된 영화가 없어요.</p>' : '';
+  const indivHtml = '<div class="region" id="indiv"><h1>개별 보관</h1>' + (indiv.length
+    ? '<section class="cat"><h3>개별 보관 <small>' + indiv.length + '편</small></h3><div class="slots"><div class="slot">' +
+      indiv.map(m => reportShelfEntry(m, { individual: true }, secMap, opts)).join('') + '</div></div></section>'
+    : '<p class="mute">개별 보관으로 등록된 영화가 없어요.</p>') + '</div>';
+
+  let tocHtml = '';
+  REGIONS.forEach(r => {
+    if (tocByRegion[r] && tocByRegion[r].length) tocHtml += '<div class="tg"><div class="th">' + reportEsc(r) + '</div>' + tocByRegion[r].join('') + '</div>';
+  });
+  tocHtml += '<div class="tg"><div class="th">개별 보관</div><div class="tr">' +
+    (indiv.length ? '<a href="#indiv">' + indiv.length + '편 보기</a>' : '<span class="mute">없음</span>') + '</div></div>';
 
   const css = [
     ':root{--ink:#26231e;--mute:#8b8478;--line:#e7e2d7;--bg:#f6f4ee;--card:#fff;--acc:#8a5a1f;--acc2:#f3e7d0}',
@@ -2507,17 +2533,20 @@ function buildReportHtml(movies, settings, opts) {
     '.po{flex:none;width:44px;height:64px;object-fit:cover;border-radius:4px;background:#ece6d6}',
     '.mm{flex:1;min-width:0}.mt{font-size:15px;font-weight:700}.orig{font-weight:400;color:var(--mute);font-size:12.5px;margin-left:4px}',
     '.ms{font-size:12.5px;color:#6a6458}.ml{font-size:12px;color:var(--mute);margin-top:1px}',
+    '.rg{display:inline-block;margin-right:4px;padding:0 6px;border-radius:4px;background:#efe9db;color:var(--acc);font-size:11px}',
     '.mr{flex:none;text-align:right;display:flex;flex-direction:column;gap:4px;align-items:flex-end}',
     '.rate{color:#b8892f;font-weight:700;font-size:13px}.heart{color:#c0392b}.fm{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}',
     '.pill{display:inline-block;padding:1px 8px;border-radius:999px;background:var(--acc2);color:var(--acc);font-size:11.5px;font-weight:600}',
     '.dd{padding:4px 16px 16px 74px}dl{margin:0;display:grid;grid-template-columns:78px 1fr;gap:6px 12px;font-size:13.5px}',
     'dt{color:var(--mute)}dd{margin:0}.pre{white-space:pre-wrap}.mute{color:var(--mute)}',
-    '.region>h1{font-size:23px;margin:34px 0 4px;padding-bottom:8px;border-bottom:2px solid var(--ink);letter-spacing:-.01em}.region:first-child>h1{margin-top:6px}',
+    '.region>h1{font-size:23px;margin:34px 0 4px;padding-bottom:8px;border-bottom:2px solid var(--ink);letter-spacing:-.01em}',
     '.sec>h2{font-size:17px;margin:22px 0 2px;color:var(--acc)}',
     '.cat>h3{font-size:15px;margin:16px 0 4px}.cat>h3 small{font-weight:400;color:var(--mute);margin-left:6px}.cdesc{margin:0 0 8px;font-size:12.5px;color:var(--mute)}',
-    '.toc{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:8px 16px;margin-bottom:8px}',
-    '.trow{display:flex;gap:14px;padding:7px 0;border-bottom:1px solid #f1ede3;font-size:13px}.trow:last-child{border-bottom:none}',
-    '.trow b{flex:none;width:130px}.trow span{display:flex;flex-wrap:wrap;gap:4px 12px}.trow a{color:var(--acc);text-decoration:none}',
+    '.toc{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 20px;margin-bottom:6px}',
+    '.tg{margin:0 0 16px}.tg:last-child{margin-bottom:0}.th{font-size:15px;font-weight:800;margin-bottom:5px}',
+    '.tr{display:flex;gap:8px;padding:3px 0;font-size:13.5px;align-items:baseline}',
+    '.tn{flex:none;width:22px;color:var(--mute)}.tr>b{flex:none;min-width:88px}',
+    '.tl{display:flex;flex-wrap:wrap;gap:2px 14px}.tr a{color:var(--acc);text-decoration:none}.tr a:hover{text-decoration:underline}',
     '.slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}',
     '.slot{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}',
     '.sh{display:flex;align-items:center;gap:8px;background:#f3ede0;padding:5px 12px;font-size:12.5px;color:var(--acc)}',
@@ -2526,7 +2555,7 @@ function buildReportHtml(movies, settings, opts) {
     '.sp{flex:none;width:36px;height:52px;object-fit:cover;border-radius:3px;background:#ece6d6}',
     '.si{min-width:0}.st{font-size:13.5px;font-weight:700}.ss{font-size:12px;color:var(--mute)}',
     '.hide{display:none!important}.off{display:none}',
-    '@media(max-width:640px){.hw{padding:10px 14px}#q{margin-left:0;width:100%}.dd{padding-left:16px}.mv>summary{padding:10px 12px}.trow{flex-direction:column;gap:2px}.trow b{width:auto}main{padding:16px 12px 60px}}',
+    '@media(max-width:640px){.hw{padding:10px 14px}#q{margin-left:0;width:100%}.dd{padding-left:16px}.mv>summary{padding:10px 12px}.tr{flex-wrap:wrap}main{padding:16px 12px 60px}}',
     '@media print{header{position:static}#q,.tabs,.fbar,.rc .link{display:none}.panel.off{display:block!important}body{background:#fff}.mv,.slot{break-inside:avoid}}'
   ].join('');
   const js = [
@@ -2590,10 +2619,6 @@ function buildReportHtml(movies, settings, opts) {
     '<div class="sc"><b>' + (movies.length - owned) + '</b><span>미보유</span></div>' +
     '<div class="sc"><b>' + discSlots.size + '</b><span>DVD 보관 장 수</span></div>' +
     fmtList.map(([f, n]) => '<div class="sc"><b>' + n + '</b><span>' + reportEsc(f) + '</span></div>').join('') + '</div>';
-  const indivHtml = indiv.length
-    ? '<div class="region"><h1>개별 보관</h1><section class="cat"><h3>개별 보관 <small>' + indiv.length + '편</small></h3><div class="slots">' +
-      '<div class="slot">' + indiv.map(m => reportShelfEntry(m, { individual: true }, secMap, opts)).join('') + '</div></div></section></div>'
-    : '';
   return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<title>영화 컬렉션 ' + today + '</title><style>' + css + '</style></head><body>' +
     '<header><div class="hw"><h1 class="ttl">영화 컬렉션</h1><span class="sub">' + today + ' 기준</span>' +
@@ -2603,7 +2628,7 @@ function buildReportHtml(movies, settings, opts) {
     '<main><section id="p-all" class="panel">' + sum + fbar +
     '<div class="rc"><b id="cnt">' + movies.length + '편</b><button type="button" class="link" id="reset">필터 초기화</button></div>' +
     '<div id="list">' + listHtml + '</div></section>' +
-    '<section id="p-dvd" class="panel off">' + (tocRows.length ? '<div class="toc">' + tocRows.join('') + '</div>' : '') + shelf + indivHtml + shelfEmpty + '</section></main>' +
+    '<section id="p-dvd" class="panel off"><div class="toc">' + tocHtml + '</div>' + shelf + indivHtml + '</section></main>' +
     '<scr' + 'ipt>' + js + '<' + '/script></body></html>';
 }
 function buildCsv(movies, settings) {
@@ -2685,7 +2710,7 @@ function ExportModal({ movies, settings, onClose }) {
             </div>
             <p className="hint-text-small">
               {format === 'html'
-                ? '「전체 목록」(매체·보관·상태 필터, 정렬)과 「DVD 보관함」(위치별) 두 탭으로 구성돼요. 더블클릭하면 맥의 Safari·Chrome에서 바로 열리고, 상단 검색창이나 ⌘F로 검색할 수 있어요. 영화를 누르면 줄거리·출연 등 상세가 펼쳐져요. 인쇄 → PDF 저장도 가능해요.'
+                ? '「전체 목록」(매체·보관·상태 필터, 정렬)과 「DVD 보관함」(외화 / 한국 / 개별 보관 목차와 칸별 정리) 두 탭으로 구성돼요. 더블클릭하면 맥의 Safari·Chrome에서 바로 열리고, 상단 검색창이나 ⌘F로 검색할 수 있어요. 영화를 누르면 줄거리·출연 등 상세가 펼쳐져요. 인쇄 → PDF 저장도 가능해요.'
                 : '영화·디스크 한 줄씩 정리한 표예요. 맥의 Numbers·엑셀에서 한글이 깨지지 않도록 저장돼요. 정렬·필터가 필요할 때 쓰세요.'}
             </p>
           </div>
