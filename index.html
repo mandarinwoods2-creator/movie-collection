@@ -2298,10 +2298,22 @@ function reportEsc(v) {
 function reportList(arr, single) {
   return Array.isArray(arr) && arr.length ? arr : (single ? [single] : []);
 }
-function reportEntry(m, l, opts, slotSize) {
+const REPORT_UNCLASSIFIED = '미분류';
+function moviePlatforms(m) {
+  const out = [];
+  (m.formats || []).forEach(f => {
+    const t = String(f).trim();
+    if (t && !out.includes(t)) out.push(t);
+  });
+  if (getLocations(m).length > 0 && !out.includes('DVD')) out.push('DVD');
+  if (out.length === 0) out.push(REPORT_UNCLASSIFIED);
+  return out;
+}
+function reportEntry(m, loc, ctx) {
   const countries = reportList(m.countries, m.country);
   const genres = reportList(m.genres, m.genre);
-  const meta = [m.year, countries.join(', '), genres.join(', '), m.runtime ? m.runtime + '분' : '', m.ageRating].filter(Boolean).join(' · ');
+  const plats = moviePlatforms(m);
+  const sub = [m.year, countries.join(', '), genres.join(', '), m.runtime ? m.runtime + '분' : '', m.ageRating].filter(Boolean).join(' · ');
   const rows = [];
   const add = (k, v) => { if (v) rows.push('<dt>' + k + '</dt><dd>' + v + '</dd>'); };
   add('감독', reportEsc(m.director));
@@ -2309,191 +2321,290 @@ function reportEntry(m, l, opts, slotSize) {
   if (m.seriesName) {
     add('시리즈', reportEsc(m.seriesName + (m.seriesOrder !== '' && m.seriesOrder != null ? ' #' + m.seriesOrder : '') + (m.seriesUnofficial ? ' (비공식)' : '') + (m.seriesRemake ? ' (리메이크)' : '')));
   }
-  add('매체', reportEsc((m.formats || []).join(', ')));
+  add('플랫폼', reportEsc(plats.join(', ')));
   let discText = '';
-  if (l && !l.individual) {
-    const cs = l.contents || [];
-    if ((l.disc || 1) > 1 || l.note || cs.some(c => c !== 'main')) {
-      discText = 'Disc ' + (l.disc || 1) + (cs.length ? ' · ' + cs.map(contentLabel).join(', ') : '') + (l.note ? ' (' + l.note + ')' : '');
-      add('디스크', reportEsc(discText));
+  if (loc && !loc.individual) {
+    const cs = loc.contents || [];
+    if ((loc.disc || 1) > 1 || loc.note || cs.some(c => c !== 'main')) {
+      discText = 'Disc ' + (loc.disc || 1) + (cs.length ? ' · ' + cs.map(contentLabel).join(', ') : '') + (loc.note ? ' (' + loc.note + ')' : '');
     }
   }
+  const locTexts = (loc ? [loc] : getLocations(m)).map(l => {
+    if (l.individual) return '개별 보관';
+    const sec = ctx.secMap.get(l.section);
+    return (sec ? sectionRegion(sec) + ' › ' : '') + l.section + ' › (' + l.categoryNumber + ') ' + l.categoryName + (l.itemNumber ? ' · ' + l.itemNumber + '번' : '');
+  });
+  if (!ctx.inShelf && locTexts.length) add('보관 위치', reportEsc(locTexts.join(' / ')));
+  add('디스크', reportEsc(discText));
   add('줄거리', m.synopsis ? '<span class="syn">' + reportEsc(m.synopsis) + '</span>' : '');
   add('태그', reportEsc((m.hashtags || []).map(t => '#' + t).join(' ')));
   add('메모', m.notes ? '<span class="syn">' + reportEsc(m.notes) + '</span>' : '');
-  const rating = Number(m.rating) > 0 ? '<span class="rate">★ ' + Number(m.rating) + ' / 5</span>' : '';
-  const badges = (m.favorite ? '<span class="heart">♥</span>' : '') + (m.status === 'wishlist' ? '<span class="tag wish">미보유</span>' : '');
-  const poster = opts.withPoster && m.posterUrl
+  const rating = Number(m.rating) > 0 ? '<span class="rate">★ ' + Number(m.rating) + '</span>' : '';
+  const badges = (m.favorite ? '<span class="heart">♥</span>' : '') + (m.status === 'wishlist' ? '<span class="pill wish">미보유</span>' : '');
+  const poster = ctx.withPoster && m.posterUrl
     ? '<img class="poster" loading="lazy" alt="" src="' + reportEsc(m.posterUrl) + '">'
     : '<div class="poster ph"></div>';
   const q = [m.titleKr, m.titleOriginal, m.year, countries.join(' '), genres.join(' '), m.director, (m.actors || []).join(' '),
-    m.seriesName, (m.hashtags || []).join(' '), m.notes, m.synopsis, (m.formats || []).join(' '), discText,
-    l && !l.individual ? l.section + ' ' + l.categoryName : ''].join(' ').toLowerCase();
-  return '<article class="entry" data-q="' + reportEsc(q) + '">' + poster +
-    '<div class="info"><h4>' + reportEsc(m.titleKr || '제목 없음') +
-    (m.titleOriginal ? ' <span class="orig">' + reportEsc(m.titleOriginal) + '</span>' : '') + ' ' + rating + ' ' + badges + '</h4>' +
-    (meta ? '<div class="meta">' + reportEsc(meta) + '</div>' : '') +
-    '<dl>' + rows.join('') + '</dl></div></article>';
+    m.seriesName, (m.hashtags || []).join(' '), m.notes, m.synopsis, plats.join(' '), locTexts.join(' ')].join(' ').toLowerCase();
+  const rightSub = ctx.inShelf ? (discText ? '<span class="s">' + reportEsc(discText) + '</span>' : '')
+    : (locTexts.length ? '<span class="s">' + reportEsc(locTexts[0]) + '</span>' : '');
+  const platPills = ctx.inShelf ? '' : plats.map(p => '<span class="pill">' + reportEsc(p) + '</span>').join('');
+  return '<details class="entry" data-id="' + reportEsc(m.id) + '" data-q="' + reportEsc(q) + '" data-own="' + (m.status === 'wishlist' ? 'wish' : 'owned') +
+    '" data-fav="' + (m.favorite ? '1' : '0') + '" data-rate="' + (Number(m.rating) || 0) + '" data-genre="' + reportEsc(genres.join('|')) +
+    '" data-year="' + reportEsc(m.year || '') + '" data-title="' + reportEsc(m.titleKr || '') + '"><summary>' + poster +
+    '<div class="main"><div class="t">' + reportEsc(m.titleKr || '제목 없음') + (m.titleOriginal ? '<span class="o">' + reportEsc(m.titleOriginal) + '</span>' : '') + '</div>' +
+    (sub ? '<div class="s">' + reportEsc(sub) + '</div>' : '') + (m.director ? '<div class="s">감독 ' + reportEsc(m.director) + '</div>' : '') + '</div>' +
+    '<div class="r"><div>' + rating + ' ' + badges + '</div>' + platPills + rightSub + '</div></summary>' +
+    '<div class="more"><dl>' + rows.join('') + '</dl></div></details>';
 }
 function buildReportHtml(movies, settings, opts) {
   const d = new Date();
   const today = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-  const byKey = new Map();
-  const noLoc = [];
-  const indiv = [];
-  const indivSeen = new Set();
-  movies.forEach(m => {
-    const ls = getLocations(m);
-    if (ls.length === 0) { noLoc.push(m); return; }
-    ls.forEach(l => {
-      if (l.individual) {
-        if (!indivSeen.has(m.id)) { indivSeen.add(m.id); indiv.push(m); }
-        return;
-      }
-      const key = catKey(l);
-      if (!byKey.has(key)) byKey.set(key, []);
-      byKey.get(key).push({ m, l });
-    });
+  const secMap = new Map(settings.sections.map(s => [s.name, s]));
+  const platMap = new Map();
+  movies.forEach(m => moviePlatforms(m).forEach(p => {
+    if (!platMap.has(p)) platMap.set(p, []);
+    platMap.get(p).push(m);
+  }));
+  const platNames = Array.from(platMap.keys()).sort((a, b) => {
+    if (a === 'DVD') return -1;
+    if (b === 'DVD') return 1;
+    if (a === REPORT_UNCLASSIFIED) return 1;
+    if (b === REPORT_UNCLASSIFIED) return -1;
+    return platMap.get(b).length - platMap.get(a).length || a.localeCompare(b, 'ko');
   });
   const byTitle = (a, b) => String(a.titleKr || '').localeCompare(String(b.titleKr || ''), 'ko');
-  const discSlots = new Set();
-  byKey.forEach((es, key) => es.forEach(e => discSlots.add(key + '|' + e.l.itemNumber)));
-  const toc = [];
+  const ctxShelf = { secMap, withPoster: opts.withPoster, inShelf: true };
+  const ctxList = { secMap, withPoster: opts.withPoster, inShelf: false };
   let uidn = 0;
   const nextId = p => p + (uidn++);
+  const tocPlat = [];
+  const tocDvd = [];
+  let body = '';
 
-  const catBlock = (id, title, desc, entries) => {
+  const catBlock = (title, desc, entries) => {
     const slots = new Map();
     entries.slice().sort((a, b) => (Number(a.l.itemNumber) || 0) - (Number(b.l.itemNumber) || 0) || (a.l.disc || 1) - (b.l.disc || 1)).forEach(e => {
       const k = String(e.l.itemNumber == null ? '' : e.l.itemNumber);
       if (!slots.has(k)) slots.set(k, []);
       slots.get(k).push(e);
     });
-    const movieCount = new Set(entries.map(e => e.m.id)).size;
-    let h = '<section class="cat" id="' + id + '"><h3>' + reportEsc(title) + ' <small>' + slots.size + '장 · ' + movieCount + '편</small></h3>';
+    const mc = new Set(entries.map(e => e.m.id)).size;
+    let h = '<div class="cat"><h5 class="cat-h">' + reportEsc(title) + ' <small>' + slots.size + '장 · ' + mc + '편</small></h5>';
     if (desc) h += '<p class="cat-desc">' + reportEsc(desc) + '</p>';
     slots.forEach((es, k) => {
       const ids = new Set(es.map(e => e.m.id));
       h += '<div class="slot"><div class="slot-h">' + (k ? reportEsc(k) + '번 칸' : '번호 미지정') +
-        (ids.size > 1 ? ' <span class="shared">한 디스크에 ' + ids.size + '편 수록</span>' : '') + '</div>';
-      es.forEach(e => { h += reportEntry(e.m, e.l, opts, es.length); });
+        (ids.size > 1 ? '<span class="shared">한 디스크에 ' + ids.size + '편 수록</span>' : '') + '</div>';
+      es.forEach(e => { h += reportEntry(e.m, e.l, ctxShelf); });
       h += '</div>';
     });
-    return h + '</section>';
+    return h + '</div>';
   };
 
-  const used = new Set();
-  let body = '';
-  REGIONS.forEach(r => {
-    let regionHtml = '';
-    const regionToc = [];
-    sectionsOfRegion(settings, r).forEach(sec => {
-      let secHtml = '';
-      const secId = nextId('s');
-      const secToc = [];
-      settings.categories.filter(c => c.section === sec.name).sort((a, b) => a.number - b.number).forEach(c => {
-        const key = sec.name + '|' + c.name + '|' + String(c.number == null ? '' : c.number);
-        const es = byKey.get(key);
-        if (!es) return;
-        used.add(key);
-        const cid = nextId('c');
-        secToc.push({ level: 3, id: cid, text: '(' + c.number + ') ' + c.name });
-        secHtml += catBlock(cid, '(' + c.number + ') ' + c.name, c.description || '', es);
+  platNames.forEach(p => {
+    const list = platMap.get(p);
+    const pid = nextId('p');
+    tocPlat.push({ id: pid, text: p, n: list.length });
+    if (p !== 'DVD') {
+      body += '<section class="plat" id="' + pid + '" data-plat="' + reportEsc(p) + '"><div class="plat-banner"><h2>' + reportEsc(p) + '</h2><small>' + list.length + '편</small></div><div class="list">' +
+        list.slice().sort(byTitle).map(m => reportEntry(m, null, ctxList)).join('') + '</div></section>';
+      return;
+    }
+    const byKey = new Map();
+    const indiv = [];
+    const noLoc = [];
+    list.forEach(m => {
+      const ls = getLocations(m);
+      if (ls.length === 0) { noLoc.push(m); return; }
+      let isIndiv = false;
+      ls.forEach(l => {
+        if (l.individual) { isIndiv = true; return; }
+        const key = catKey(l);
+        if (!byKey.has(key)) byKey.set(key, []);
+        byKey.get(key).push({ m, l });
       });
-      if (secHtml) {
-        regionToc.push({ level: 2, id: secId, text: sec.name });
-        secToc.forEach(t => regionToc.push(t));
-        regionHtml += '<div class="sec" id="' + secId + '"><h2>' + reportEsc(sec.name) + '</h2>' + secHtml + '</div>';
+      if (isIndiv) indiv.push(m);
+    });
+    const discSet = new Set();
+    byKey.forEach((es, key) => es.forEach(e => discSet.add(key + '|' + e.l.itemNumber)));
+    let h = '<section class="plat" id="' + pid + '" data-plat="DVD"><div class="plat-banner"><h2>DVD</h2><small>보관함 ' + discSet.size + '장 · ' + list.length + '편</small></div>';
+    const used = new Set();
+    REGIONS.forEach(r => {
+      let rh = '';
+      let rDiscs = 0;
+      const rMovies = new Set();
+      const secToc = [];
+      sectionsOfRegion(settings, r).forEach(sec => {
+        let sh = '';
+        let sDiscs = 0;
+        const sMovies = new Set();
+        settings.categories.filter(c => c.section === sec.name).sort((a, b) => a.number - b.number).forEach(c => {
+          const key = sec.name + '|' + c.name + '|' + String(c.number == null ? '' : c.number);
+          const es = byKey.get(key);
+          if (!es) return;
+          used.add(key);
+          es.forEach(e => { sMovies.add(e.m.id); rMovies.add(e.m.id); });
+          const slotCount = new Set(es.map(e => e.l.itemNumber)).size;
+          sDiscs += slotCount;
+          rDiscs += slotCount;
+          sh += catBlock('(' + c.number + ') ' + c.name, c.description || '', es);
+        });
+        if (sh) {
+          const sid = nextId('s');
+          secToc.push({ id: sid, text: sec.name });
+          rh += '<div class="sec" id="' + sid + '"><h4 class="sec-h">' + reportEsc(sec.name) + ' <small>' + sDiscs + '장 · ' + sMovies.size + '편</small></h4>' + sh + '</div>';
+        }
+      });
+      if (rh) {
+        const rid = nextId('r');
+        tocDvd.push({ id: rid, text: r === '외화' ? '외화' : '한국 영화', level: 1 });
+        secToc.forEach(t => tocDvd.push({ id: t.id, text: t.text, level: 2 }));
+        h += '<div class="region" id="' + rid + '"><div class="region-h"><span>' + (r === '외화' ? '외화' : '한국 영화') + '</span><small>' + rDiscs + '장 · ' + rMovies.size + '편</small></div>' + rh + '</div>';
       }
     });
-    if (regionHtml) {
-      const rid = nextId('r');
-      body += '<div class="region" id="' + rid + '"><h1>' + reportEsc(r) + '</h1>' + regionHtml + '</div>';
-      toc.push({ level: 0, id: rid, text: r });
-      regionToc.forEach(t => toc.push(t));
+    const leftover = [];
+    byKey.forEach((es, key) => { if (!used.has(key)) leftover.push(es); });
+    if (leftover.length) {
+      const xid = nextId('x');
+      tocDvd.push({ id: xid, text: '위치 정리 필요', level: 1 });
+      h += '<div class="region" id="' + xid + '"><div class="region-h plain"><span>위치 정리 필요</span></div><p class="cat-desc">현재 설정에 없는 섹션·카테고리에 등록된 영화예요.</p>';
+      leftover.forEach(es => {
+        const l0 = es[0].l;
+        h += catBlock(l0.section + ' › (' + l0.categoryNumber + ') ' + l0.categoryName, '', es);
+      });
+      h += '</div>';
     }
+    if (indiv.length) {
+      const iid = nextId('i');
+      tocDvd.push({ id: iid, text: '개별 보관', level: 1 });
+      h += '<div class="region" id="' + iid + '"><div class="region-h plain"><span>개별 보관</span><small>' + indiv.length + '편</small></div><div class="list">' +
+        indiv.slice().sort(byTitle).map(m => reportEntry(m, { individual: true }, ctxShelf)).join('') + '</div></div>';
+    }
+    if (noLoc.length) {
+      const nid = nextId('n');
+      tocDvd.push({ id: nid, text: 'DVD · 위치 미지정', level: 1 });
+      h += '<div class="region" id="' + nid + '"><div class="region-h plain"><span>DVD · 보관 위치 미지정</span><small>' + noLoc.length + '편</small></div><div class="list">' +
+        noLoc.slice().sort(byTitle).map(m => reportEntry(m, null, ctxList)).join('') + '</div></div>';
+    }
+    body += h + '</section>';
   });
-  const leftover = [];
-  byKey.forEach((es, key) => { if (!used.has(key)) leftover.push({ key, es }); });
-  if (leftover.length) {
-    const lid = nextId('x');
-    let h = '<div class="region" id="' + lid + '"><h1>위치 정리 필요</h1><p class="cat-desc">현재 설정에 없는 섹션·카테고리에 등록된 영화예요.</p>';
-    leftover.forEach(({ es }) => {
-      const l0 = es[0].l;
-      h += catBlock(nextId('c'), l0.section + ' › (' + l0.categoryNumber + ') ' + l0.categoryName, '', es);
-    });
-    body += h + '</div>';
-    toc.push({ level: 0, id: lid, text: '위치 정리 필요' });
-  }
-  if (indiv.length) {
-    const iid = nextId('i');
-    let h = '<div class="region" id="' + iid + '"><h1>개별 보관</h1><section class="cat"><h3>개별 보관 <small>' + indiv.length + '편</small></h3><div class="slot">';
-    indiv.slice().sort(byTitle).forEach(m => { h += reportEntry(m, null, opts, 1); });
-    body += h + '</div></section></div>';
-    toc.push({ level: 0, id: iid, text: '개별 보관' });
-  }
-  if (noLoc.length) {
-    const nid = nextId('n');
-    let h = '<div class="region" id="' + nid + '"><h1>보관 위치 없음</h1><section class="cat"><h3>보관 위치 없음 <small>' + noLoc.length + '편</small></h3><div class="slot">';
-    noLoc.slice().sort(byTitle).forEach(m => { h += reportEntry(m, null, opts, 1); });
-    body += h + '</div></section></div>';
-    toc.push({ level: 0, id: nid, text: '보관 위치 없음' });
-  }
 
-  const tocHtml = toc.length === 0 ? '' :
-    '<nav class="toc"><b>바로가기</b> ' + toc.map(t => '<a class="l' + t.level + '" href="#' + t.id + '">' + reportEsc(t.text) + '</a>').join('') + '</nav>';
   const owned = movies.filter(m => m.status !== 'wishlist').length;
+  const allGenres = Array.from(new Set(movies.flatMap(m => reportList(m.genres, m.genre)))).sort((a, b) => a.localeCompare(b, 'ko'));
+  const platChips = '<button type="button" class="chip on" data-k="plat" data-v="all">전체 <small>' + movies.length + '</small></button>' +
+    tocPlat.map(t => '<button type="button" class="chip" data-k="plat" data-v="' + reportEsc(t.text) + '">' + reportEsc(t.text) + ' <small>' + t.n + '</small></button>').join('');
+  const tocHtml = tocDvd.length ? '<nav class="toc"><b>DVD 바로가기</b>' +
+    tocDvd.map(t => '<a class="l' + t.level + '" href="#' + t.id + '">' + reportEsc(t.text) + '</a>').join('') + '</nav>' : '';
   const css = [
-    'body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif;color:#222;background:#faf8f3;line-height:1.55}',
-    'header{position:sticky;top:0;z-index:10;background:#2b2118;color:#f4ead7;padding:14px 22px;display:flex;flex-wrap:wrap;gap:8px 20px;align-items:center}',
-    'header h1{margin:0;font-size:18px}header .sum{font-size:13px;opacity:.85}',
-    '#q{margin-left:auto;min-width:260px;padding:8px 12px;border-radius:8px;border:none;font-size:14px}',
-    'main{max-width:980px;margin:0 auto;padding:18px 22px 60px}',
-    '.toc{display:flex;flex-wrap:wrap;gap:6px 10px;font-size:12.5px;margin:6px 0 20px;padding:12px 14px;background:#fff;border:1px solid #e6dfd0;border-radius:10px}',
-    '.toc a{color:#6b4b1f;text-decoration:none}.toc a.l0{font-weight:700;margin-left:6px}.toc a.l3{opacity:.8}',
-    '.region>h1{font-size:24px;margin:34px 0 4px;padding-bottom:6px;border-bottom:3px solid #b8892f}',
-    '.sec>h2{font-size:19px;margin:24px 0 6px;color:#6b4b1f}',
-    '.cat>h3{font-size:16px;margin:18px 0 4px}.cat>h3 small{font-weight:400;color:#8a7a62;margin-left:6px}',
-    '.cat-desc{margin:0 0 8px;font-size:12.5px;color:#8a7a62}',
-    '.slot{background:#fff;border:1px solid #e6dfd0;border-radius:10px;margin:10px 0;overflow:hidden;break-inside:avoid}',
-    '.slot-h{background:#f1e8d4;padding:6px 12px;font-size:12.5px;font-weight:700;color:#6b4b1f}',
-    '.shared{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:999px;background:#b8892f;color:#fff;font-weight:600;font-size:11.5px}',
-    '.entry{display:flex;gap:14px;padding:12px;border-top:1px solid #f0eadc}.slot-h+.entry{border-top:none}',
-    '.poster{flex:none;width:64px;height:92px;object-fit:cover;border-radius:4px;background:#e9e1cf}',
-    '.info{min-width:0;flex:1}.info h4{margin:0 0 2px;font-size:15px}',
-    '.orig{font-weight:400;color:#8a7a62;font-size:12.5px}.rate{color:#b8892f;font-size:13px;font-weight:600}.heart{color:#c0392b}',
-    '.tag{display:inline-block;padding:0 7px;border-radius:999px;font-size:11px;border:1px solid #bbb;color:#777}',
-    '.meta{font-size:12.5px;color:#6f6250;margin-bottom:4px}',
-    'dl{margin:0;display:grid;grid-template-columns:54px 1fr;gap:2px 10px;font-size:13px}dt{color:#8a7a62}dd{margin:0}',
-    '.syn{white-space:pre-wrap}.hide{display:none}',
-    '@media print{header{position:static;background:none;color:#000;padding:0 0 8px}#q,.toc{display:none}body{background:#fff}.entry{break-inside:avoid}}'
+    ':root{--ink:#241c15;--soft:#7a6c5a;--line:#e8e0d0;--bg:#f6f2ea;--gold:#b8892f;--deep:#2b2118}',
+    '*{box-sizing:border-box}',
+    'body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif}',
+    'header.top{background:var(--deep);color:#f4ead7;padding:24px 28px 18px}',
+    'header.top h1{margin:0 0 4px;font-size:24px;letter-spacing:-.01em}.sum{font-size:13px;opacity:.82}',
+    '.bar{position:sticky;top:0;z-index:20;background:#fffdf8;border-bottom:1px solid var(--line);padding:12px 28px;display:flex;flex-direction:column;gap:9px;box-shadow:0 2px 10px rgba(60,40,10,.06)}',
+    '.row{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center}',
+    '.lbl{font-size:12px;color:var(--soft);font-weight:700;min-width:52px}',
+    '.chip{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:999px;padding:4px 13px;font-size:13px;cursor:pointer;font-family:inherit}',
+    '.chip:hover{border-color:var(--gold)}.chip.on{background:var(--deep);border-color:var(--deep);color:#fff}.chip small{opacity:.6;margin-left:3px}',
+    'select,#q{border:1px solid var(--line);border-radius:8px;padding:6px 10px;font:inherit;font-size:13px;background:#fff;color:var(--ink)}',
+    '#q{flex:1;min-width:220px}.count{margin-left:auto;font-size:13px;color:var(--soft)}',
+    'main{max-width:1040px;margin:0 auto;padding:6px 28px 90px}',
+    '.toc{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;margin:22px 0 0;padding:14px 18px;background:#fff;border:1px solid var(--line);border-radius:12px}',
+    '.toc b{color:var(--soft);margin-right:6px}.toc a{color:#6b4b1f;text-decoration:none}.toc a.l1{font-weight:700;margin-left:10px}.toc a.l2{opacity:.8}',
+    '.plat{margin-top:64px}',
+    '.plat-banner{display:flex;align-items:baseline;gap:14px;padding:6px 0 12px;border-bottom:3px solid var(--deep)}',
+    '.plat-banner h2{margin:0;font-size:28px}.plat-banner small,.region-h small,.sec-h small,.cat-h small{color:var(--soft);font-weight:400;font-size:13px}',
+    '.region{margin-top:52px}',
+    '.region-h{display:flex;align-items:baseline;gap:14px;font-size:22px;font-weight:800;color:#fff;background:linear-gradient(90deg,#a87a22,#d4a853);padding:11px 20px;border-radius:12px}',
+    '.region-h small{color:rgba(255,255,255,.88)}.region-h.plain{background:#6f6250}',
+    '.sec{margin-top:44px}',
+    '.sec-h{margin:0 0 6px;font-size:20px;color:var(--deep);padding-left:13px;border-left:6px solid var(--gold)}',
+    '.cat{margin:30px 0 0 14px}.cat-h{margin:0 0 4px;font-size:16.5px}.cat-desc{margin:0 0 12px;color:var(--soft);font-size:13px}',
+    '.slot{background:#fff;border:1px solid var(--line);border-radius:12px;margin:14px 0;overflow:hidden;box-shadow:0 1px 4px rgba(60,40,10,.05)}',
+    '.slot-h{background:#f3ead7;padding:8px 16px;font-size:13px;font-weight:700;color:#6b4b1f}',
+    '.shared{display:inline-block;margin-left:10px;padding:1px 9px;border-radius:999px;background:var(--gold);color:#fff;font-weight:600;font-size:11.5px}',
+    '.list{display:flex;flex-direction:column;gap:10px;margin-top:16px}',
+    '.list>.entry{background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 1px 4px rgba(60,40,10,.05)}',
+    '.slot .entry{border-top:1px solid #f0eadc}.slot-h+.entry{border-top:none}',
+    '.entry summary{list-style:none;cursor:pointer;display:grid;grid-template-columns:50px 1fr auto;gap:16px;align-items:center;padding:11px 16px}',
+    '.entry summary::-webkit-details-marker{display:none}.entry summary:hover{background:#fbf8f0}',
+    '.poster{width:50px;height:72px;object-fit:cover;border-radius:5px;background:#e9e1cf}',
+    '.t{font-weight:700;font-size:16px}.o{color:var(--soft);font-size:12.5px;margin-left:8px;font-weight:400}',
+    '.s{font-size:12.5px;color:var(--soft)}.main{min-width:0}',
+    '.r{display:flex;flex-direction:column;align-items:flex-end;gap:4px;text-align:right}',
+    '.rate{color:var(--gold);font-weight:700}.heart{color:#c0392b}',
+    '.pill{display:inline-block;margin-left:4px;padding:0 8px;border-radius:999px;font-size:11px;border:1px solid var(--line);background:#f6f2ea;color:#6b4b1f}.pill.wish{background:#fff;color:#999;border-color:#bbb}',
+    '.more{padding:2px 18px 16px 82px;font-size:13.5px}',
+    '.more dl{display:grid;grid-template-columns:64px 1fr;gap:5px 12px;margin:0}.more dt{color:var(--soft)}.more dd{margin:0}.syn{white-space:pre-wrap}',
+    '.hide{display:none!important}',
+    '@media print{.bar,.toc{display:none}body{background:#fff}header.top{background:none;color:#000;padding:0 0 10px}.plat,.region{break-before:page}.entry{break-inside:avoid}.slot{break-inside:avoid}}'
   ].join('');
   const js = [
-    "var q=document.getElementById('q');",
-    "function cnt(el){return el.querySelectorAll('.entry:not(.hide)').length;}",
-    "q.addEventListener('input',function(){",
-    "var t=q.value.trim().toLowerCase();",
-    "var es=document.querySelectorAll('.entry');",
-    "for(var i=0;i<es.length;i++){var ok=!t||es[i].getAttribute('data-q').indexOf(t)>=0;es[i].classList.toggle('hide',!ok);}",
-    "var gs=document.querySelectorAll('.slot,.cat,.sec,.region');",
-    "for(var j=0;j<gs.length;j++){gs[j].classList.toggle('hide',cnt(gs[j])===0);}",
-    "});"
-  ].join('');
+    "(function(){",
+    "var $$=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s));};",
+    "var st={plat:'all',own:'all',fav:false,rate:0,genre:'',sort:'title',q:''};",
+    "function cmp(a,b){var ta=a.getAttribute('data-title'),tb=b.getAttribute('data-title');",
+    "if(st.sort==='year'){return (parseInt(b.getAttribute('data-year'))||0)-(parseInt(a.getAttribute('data-year'))||0)||ta.localeCompare(tb,'ko');}",
+    "if(st.sort==='rate'){return (parseFloat(b.getAttribute('data-rate'))||0)-(parseFloat(a.getAttribute('data-rate'))||0)||ta.localeCompare(tb,'ko');}",
+    "return ta.localeCompare(tb,'ko');}",
+    "function chips(){$$('.chip').forEach(function(c){var k=c.getAttribute('data-k'),v=c.getAttribute('data-v');",
+    "c.classList.toggle('on',k==='fav'?st.fav:String(st[k])===v);});}",
+    "function apply(){var ids={};",
+    "$$('.entry').forEach(function(e){var ok=true;",
+    "if(st.q&&e.getAttribute('data-q').indexOf(st.q)<0)ok=false;",
+    "if(ok&&st.own!=='all'&&e.getAttribute('data-own')!==st.own)ok=false;",
+    "if(ok&&st.fav&&e.getAttribute('data-fav')!=='1')ok=false;",
+    "if(ok&&st.rate>0&&(parseFloat(e.getAttribute('data-rate'))||0)<st.rate)ok=false;",
+    "if(ok&&st.genre&&('|'+e.getAttribute('data-genre')+'|').indexOf('|'+st.genre+'|')<0)ok=false;",
+    "var p=e.closest('.plat');var inPlat=st.plat==='all'||(p&&p.getAttribute('data-plat')===st.plat);",
+    "e.classList.toggle('hide',!ok);if(ok&&inPlat)ids[e.getAttribute('data-id')]=1;});",
+    "$$('.plat').forEach(function(p){var off=st.plat!=='all'&&p.getAttribute('data-plat')!==st.plat;",
+    "p.classList.toggle('hide',off||!p.querySelector('.entry:not(.hide)'));});",
+    "$$('.slot,.cat,.sec,.region').forEach(function(g){g.classList.toggle('hide',!g.querySelector('.entry:not(.hide)'));});",
+    "$$('.list').forEach(function(l){var es=$$('.entry',l);es.sort(cmp);es.forEach(function(e){l.appendChild(e);});});",
+    "document.getElementById('cnt').textContent='표시 중 '+Object.keys(ids).length+'편';}",
+    "document.addEventListener('click',function(ev){var c=ev.target.closest?ev.target.closest('[data-k]'):null;if(!c)return;",
+    "var k=c.getAttribute('data-k'),v=c.getAttribute('data-v');",
+    "if(k==='fav'){st.fav=!st.fav;}else if(k==='reset'){st={plat:'all',own:'all',fav:false,rate:0,genre:'',sort:'title',q:''};",
+    "document.getElementById('q').value='';document.getElementById('rate').value='0';document.getElementById('genre').value='';document.getElementById('sort').value='title';}",
+    "else if(k==='open'){var ds=$$('details.entry');var any=ds.some(function(d){return !d.open;});ds.forEach(function(d){d.open=any;});return;}",
+    "else{st[k]=v;}chips();apply();});",
+    "document.getElementById('q').addEventListener('input',function(e){st.q=e.target.value.trim().toLowerCase();apply();});",
+    "document.getElementById('rate').addEventListener('change',function(e){st.rate=parseFloat(e.target.value)||0;apply();});",
+    "document.getElementById('genre').addEventListener('change',function(e){st.genre=e.target.value;apply();});",
+    "document.getElementById('sort').addEventListener('change',function(e){st.sort=e.target.value;apply();});",
+    "window.addEventListener('beforeprint',function(){$$('details.entry').forEach(function(d){d.open=true;});});",
+    "apply();})();"
+  ].join('\n');
+  const bar = '<div class="bar">' +
+    '<div class="row"><span class="lbl">플랫폼</span>' + platChips + '</div>' +
+    '<div class="row"><span class="lbl">보기</span>' +
+    '<button type="button" class="chip on" data-k="own" data-v="all">전체</button>' +
+    '<button type="button" class="chip" data-k="own" data-v="owned">보유</button>' +
+    '<button type="button" class="chip" data-k="own" data-v="wish">미보유</button>' +
+    '<button type="button" class="chip" data-k="fav" data-v="1">♥ 하트만</button>' +
+    '<select id="rate"><option value="0">별점 전체</option><option value="4.5">★ 4.5 이상</option><option value="4">★ 4 이상</option><option value="3">★ 3 이상</option><option value="2">★ 2 이상</option></select>' +
+    '<select id="genre"><option value="">장르 전체</option>' + allGenres.map(g => '<option value="' + reportEsc(g) + '">' + reportEsc(g) + '</option>').join('') + '</select>' +
+    '<select id="sort"><option value="title">제목순</option><option value="year">연도순(최신)</option><option value="rate">별점순</option></select>' +
+    '<button type="button" class="chip" data-k="open" data-v="1">모두 펼치기/접기</button>' +
+    '<button type="button" class="chip" data-k="reset" data-v="1">초기화</button></div>' +
+    '<div class="row"><input id="q" type="search" placeholder="문서 내 검색 (제목, 감독, 배우, 태그, 줄거리…)"><span class="count" id="cnt"></span></div></div>';
   return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<title>영화 컬렉션 ' + today + '</title><style>' + css + '</style></head><body>' +
-    '<header><h1>영화 컬렉션</h1><span class="sum">' + today + ' 기준 · 전체 ' + movies.length + '편 (보유 ' + owned + ' · 미보유 ' + (movies.length - owned) + ') · DVD ' + discSlots.size + '장</span>' +
-    '<input id="q" type="search" placeholder="문서 내 검색 (제목, 감독, 배우, 태그…)"></header>' +
-    '<main>' + tocHtml + body + '</main>' + '<scr' + 'ipt>' + js + '<' + '/script></body></html>';
+    '<header class="top"><h1>영화 컬렉션</h1><div class="sum">' + today + ' 기준 · 전체 ' + movies.length + '편 (보유 ' + owned + ' · 미보유 ' + (movies.length - owned) + ') · ' +
+    tocPlat.map(t => t.text + ' ' + t.n).join(' · ') + '</div></header>' + bar +
+    '<main>' + tocHtml + body + '</main><scr' + 'ipt>' + js + '<' + '/script></body></html>';
 }
 function buildCsv(movies, settings) {
   const secMap = new Map(settings.sections.map(s => [s.name, s]));
-  const header = ['구분', '섹션', '카테고리번호', '카테고리', '칸번호', '디스크', '디스크내용', '함께수록', '제목', '원제', '연도', '국가', '장르', '상영시간', '관람등급', '감독', '출연', '별점', '하트', '보유상태', '매체', '시리즈', '시리즈순서', '해시태그', '메모', '줄거리'];
+  const header = ['구분', '섹션', '카테고리번호', '카테고리', '칸번호', '디스크', '디스크내용', '함께수록', '제목', '원제', '연도', '국가', '장르', '상영시간', '관람등급', '감독', '출연', '별점', '하트', '보유상태', '플랫폼', '시리즈', '시리즈순서', '해시태그', '메모', '줄거리'];
   const rows = [];
   movies.forEach(m => {
     const ls = getLocations(m);
     const base = [m.titleKr, m.titleOriginal, m.year, reportList(m.countries, m.country).join(', '), reportList(m.genres, m.genre).join(', '),
       m.runtime, m.ageRating, m.director, (m.actors || []).join(', '), m.rating || '', m.favorite ? '♥' : '', m.status === 'wishlist' ? '미보유' : '보유',
-      (m.formats || []).join(', '), m.seriesName || '', m.seriesName ? m.seriesOrder : '', (m.hashtags || []).map(t => '#' + t).join(' '), m.notes, m.synopsis];
+      moviePlatforms(m).join(', '), m.seriesName || '', m.seriesName ? m.seriesOrder : '', (m.hashtags || []).map(t => '#' + t).join(' '), m.notes, m.synopsis];
     const mk = (loc, sortKey) => {
       let head;
       if (!loc) head = ['보관 위치 없음', '', '', '', '', '', '', ''];
@@ -2564,7 +2675,7 @@ function ExportModal({ movies, settings, onClose }) {
             </div>
             <p className="hint-text-small">
               {format === 'html'
-                ? '위치별(외화/한국 › 섹션 › 카테고리 › 칸 번호)로 정리한 문서예요. 더블클릭하면 맥의 Safari·Chrome에서 바로 열리고, 상단 검색창이나 ⌘F로 문서 안을 검색할 수 있어요. 인쇄 → PDF로 저장도 가능해요.'
+                ? '플랫폼별(DVD, 블루레이 등)로 나뉜 문서예요. 상단 필터(플랫폼·보유·하트·별점·장르·정렬)와 검색창, ⌘F로 문서 안을 찾을 수 있어요. DVD는 외화/한국 영화 › 섹션 › 카테고리 › 칸 번호 순으로 구분돼요. 더블클릭하면 맥의 Safari·Chrome에서 열리고, 인쇄 → PDF 저장도 가능해요.'
                 : '영화·디스크 한 줄씩 정리한 표예요. 맥의 Numbers·엑셀에서 한글이 깨지지 않도록 저장돼요. 정렬·필터가 필요할 때 쓰세요.'}
             </p>
           </div>
