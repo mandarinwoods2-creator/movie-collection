@@ -3251,14 +3251,10 @@ const APP_CSS = `
         .star-ro__bg { color: color-mix(in srgb, var(--ink-soft) 55%, transparent); }
         .star-ro__fill { position: absolute; top: 0; left: 0; overflow: hidden; white-space: nowrap; color: var(--gold); }
         .poster-tile__overlay .star-ro__bg { color: rgba(255,255,255,0.35); }
-        .status-row { display: flex; align-items: center; gap: 8px; }
-        .status-row .segmented { flex: 1; min-width: 0; }
-        .heart-filter-btn { flex: none; width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; border: 1px solid var(--line); background: transparent; color: var(--ink-soft); cursor: pointer; transition: color 0.15s, background 0.15s, box-shadow 0.15s, border-color 0.15s; }
-        .heart-filter-btn:hover { color: var(--accent); border-color: var(--accent-soft); }
-        .heart-filter-btn.is-on { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); box-shadow: 0 0 9px color-mix(in srgb, var(--accent) 50%, transparent); }
-        .series-filter-btn { flex: none; height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--ink-soft); font-size: 12.5px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: color 0.15s, background 0.15s, border-color 0.15s; }
-        .series-filter-btn:hover { color: var(--accent); border-color: var(--accent-soft); }
-        .series-filter-btn.is-on { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+        .status-toggles { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+        .toggle-pill { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line-dark); background: transparent; color: var(--fg-soft); font-size: 12.5px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+        .toggle-pill:hover { border-color: var(--gold); color: var(--fg); }
+        .toggle-pill.is-on { background: var(--gold); border-color: var(--gold); color: var(--bg); }
         .shelf-view { gap: 12px; }
         .shelf-orphan-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-radius: 10px; border: 1px solid color-mix(in srgb, #d9a441 55%, transparent); background: color-mix(in srgb, #d9a441 14%, transparent); color: var(--fg); font-size: 12.5px; line-height: 1.5; }
         .repair-row { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-bottom: 1px dashed var(--line); }
@@ -4352,30 +4348,31 @@ function MovieCollectionApp() {
         </div>
         <hr />
         <div className="sidebar-section">
-          <div className="status-row">
+          <h3>보유 상태</h3>
           <div className="segmented">
             <button type="button" className={statusFilter === 'all' ? 'is-active' : ''} onClick={() => setStatusFilter('all')}>전체</button>
             <button type="button" className={statusFilter === 'owned' ? 'is-active' : ''} onClick={() => setStatusFilter('owned')}>보유</button>
             <button type="button" className={statusFilter === 'wishlist' ? 'is-active' : ''} onClick={() => setStatusFilter('wishlist')}>미보유</button>
           </div>
-          <button
-            type="button"
-            className={`heart-filter-btn${favoriteOnly ? ' is-on' : ''}`}
-            title={favoriteOnly ? '하트 표시한 영화만 보는 중 (누르면 전체)' : '하트 표시한 영화만 보기'}
-            aria-pressed={favoriteOnly}
-            onClick={() => setFavoriteOnly(v => !v)}
-          >
-            <HeartIcon size={16} style={favoriteOnly ? { fill: 'currentColor' } : undefined} />
-          </button>
-          <button
-            type="button"
-            className={`series-filter-btn${seriesOnly ? ' is-on' : ''}`}
-            title={seriesOnly ? '시리즈만 묶어 보는 중 (누르면 전체)' : '시리즈 영화만 묶어서 보기'}
-            aria-pressed={seriesOnly}
-            onClick={() => setSeriesOnly(v => !v)}
-          >
-            시리즈만
-          </button>
+          <div className="status-toggles">
+            <button
+              type="button"
+              className={`toggle-pill${favoriteOnly ? ' is-on' : ''}`}
+              title="하트 표시한 영화만 보기"
+              aria-pressed={favoriteOnly}
+              onClick={() => setFavoriteOnly(v => !v)}
+            >
+              <HeartIcon size={13} style={favoriteOnly ? { fill: 'currentColor' } : undefined} /> 하트
+            </button>
+            <button
+              type="button"
+              className={`toggle-pill${seriesOnly ? ' is-on' : ''}`}
+              title="시리즈 영화만 묶어서 보기"
+              aria-pressed={seriesOnly}
+              onClick={() => setSeriesOnly(v => !v)}
+            >
+              시리즈만
+            </button>
           </div>
         </div>
         <hr />
