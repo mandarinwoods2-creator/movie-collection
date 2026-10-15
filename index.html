@@ -1004,6 +1004,12 @@ function buildDisplayEntries(list, expandedSeries) {
   return entries;
 }
 
+function clampDec(n, min, max) {
+  const v = parseFloat(n);
+  if (isNaN(v)) return '';
+  return Math.round(Math.min(max, Math.max(min, v)) * 100) / 100;
+}
+
 function clamp(n, min, max) {
   const v = parseInt(n, 10);
   if (isNaN(v)) return '';
@@ -1361,7 +1367,7 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
 
   function confirmNewCategory() {
     const name = newCategoryName.trim();
-    const number = clamp(newCategoryNumber || suggestedCategoryNumber, 1, 20);
+    const number = clampDec(newCategoryNumber || suggestedCategoryNumber, 0.1, 99);
     if (!name || !number) { setNewCategoryMode(false); return; }
     onAddCategory(locSection, number, name);
     setLocCategoryName(name);
@@ -1642,8 +1648,9 @@ function MovieForm({ initial, seed, formatOptions, settings, movies, onSave, onC
                       <input
                         className="field--small"
                         type="number"
-                        min={1}
-                        max={20}
+                        min={0.1}
+                        max={99}
+                        step="any"
                         value={newCategoryNumber}
                         onChange={e => setNewCategoryNumber(e.target.value)}
                         placeholder={String(suggestedCategoryNumber || '')}
@@ -1937,7 +1944,7 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
     const usedNumbers = new Set(categories.map(c => c.number));
     let suggested = 1;
     while (usedNumbers.has(suggested) && suggested <= 20) suggested++;
-    const number = clamp(newCatNumber || suggested, 1, 20);
+    const number = clampDec(newCatNumber || suggested, 0.1, 99);
     if (!name || !number) return;
     onAddCategory(activeSection, number, name, newCatDesc.trim());
     setNewCatDesc('');
@@ -2069,13 +2076,20 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
                   <div key={c.id} className="category-edit-row">
                     <input
                       key={`cn-${c.id}-${c.number}`}
-                      type="number" min={1} max={20}
+                      type="number" min={0.1} max={99} step="any"
                       defaultValue={c.number}
+                      title="소수점 가능 (예: 1.5는 1번과 2번 사이)"
                       onBlur={e => {
                         const raw = e.target.value;
                         if (raw === '') { e.target.value = c.number; return; }
-                        const v = clamp(raw, 1, 20);
-                        if (String(v) !== String(c.number)) onUpdateCategory(c.id, { number: v });
+                        const v = clampDec(raw, 0.1, 99);
+                        if (v === '' || v === c.number) { e.target.value = c.number; return; }
+                        if (categories.some(x => x.id !== c.id && Number(x.number) === v)) {
+                          window.alert(`${v}번은 이 섹션에서 이미 쓰고 있어요. 다른 번호를 입력해주세요.`);
+                          e.target.value = c.number;
+                          return;
+                        }
+                        onUpdateCategory(c.id, { number: v });
                       }}
                       onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
                     />
@@ -2104,7 +2118,7 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
                 ))}
               </div>
               <div className="field-row">
-                <input className="field--small" type="number" min={1} max={20} value={newCatNumber} onChange={e => setNewCatNumber(e.target.value)} placeholder="번호" />
+                <input className="field--small" type="number" min={0.1} max={99} step="any" value={newCatNumber} onChange={e => setNewCatNumber(e.target.value)} placeholder="번호" />
                 <input value={newCatName} onChange={e => setNewCatName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleAddCategoryClick()} placeholder="새 카테고리 이름 (예: 80년대 영화, 뮤지컬)" />
                 <input value={newCatDesc} onChange={e => setNewCatDesc(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleAddCategoryClick()} placeholder="설명 (선택)" />
                 <button type="button" className="btn btn--ghost btn--sm" onClick={handleAddCategoryClick}>추가</button>
@@ -2275,6 +2289,7 @@ function reportRow(m, secMap, opts) {
       (m.seriesUnofficial ? ' (비공식)' : '') + (m.seriesRemake ? ' (리메이크)' : ''));
   }
   const seriesLine = seriesBits.join(' · ');
+  const sOrder = Number(m.seriesOrder) || 0;
   const rows = [];
   const add = (k, v) => { if (v) rows.push('<dt>' + k + '</dt><dd>' + v + '</dd>'); };
   add('국가·장르', reportEsc([countries.join(', '), genres.join(', ')].filter(Boolean).join(' · ')));
@@ -2288,6 +2303,7 @@ function reportRow(m, secMap, opts) {
   add('메모', m.notes ? '<span class="pre">' + reportEsc(m.notes) + '</span>' : '');
   const locHtml = locShorts.join('<br>');
   return '<details class="mv" data-title="' + reportEsc(m.titleKr || '') + '" data-year="' + yearNum + '" data-rate="' + rateNum +
+    '" data-sname="' + reportEsc(m.seriesName || '') + '" data-sorder="' + sOrder +
     '" data-fmt="' + reportEsc(fm.join('|')) + '" data-grp="' + Array.from(grp).join('|') + '" data-own="' + (m.status === 'wishlist' ? '0' : '1') +
     '" data-fav="' + (m.favorite ? '1' : '0') + '" data-q="' + reportEsc(reportQuery(m, locTexts.join(' '))) + '">' +
     '<summary>' + reportPoster(m, opts, 'po') +
@@ -2330,6 +2346,7 @@ function buildReportHtml(movies, settings, opts) {
     g.forEach(x => { if (grpCount[x] != null) grpCount[x] += 1; });
   });
   const owned = movies.filter(m => m.status !== 'wishlist').length;
+  const seriesCount = movies.filter(m => m.seriesName).length;
   const fmtList = Array.from(fmtCount.entries()).sort((a, b) => b[1] - a[1]);
 
   const chip = (g, v, label, n, on) => '<button type="button" class="chip' + (on ? ' on' : '') + '" data-g="' + g + '" data-v="' + reportEsc(v) + '">' +
@@ -2338,7 +2355,7 @@ function buildReportHtml(movies, settings, opts) {
   const fbar = '<div class="fbar">' +
     frow('매체', fmtList.map(([f, n]) => chip('fmt', f, f, n)).join('')) +
     frow('보관', [['외화', '외화'], ['한국', '한국'], ['개별', '개별 보관'], ['플랫폼', '플랫폼']].filter(x => grpCount[x[0]] > 0).map(x => chip('grp', x[0], x[1], grpCount[x[0]])).join('')) +
-    frow('상태', chip('st', 'own', '보유', owned) + chip('st', 'wish', '미보유', movies.length - owned) + chip('st', 'fav', '♥ 하트')) +
+    frow('상태', chip('st', 'own', '보유', owned) + chip('st', 'wish', '미보유', movies.length - owned) + chip('st', 'fav', '♥ 하트') + chip('st', 'series', '시리즈만', seriesCount)) +
     frow('정렬', chip('sort', 'title', '제목순', null, true) + chip('sort', 'year-desc', '연도 최신순') + chip('sort', 'year-asc', '연도 오래된순') +
       chip('sort', 'rate-desc', '별점 높은순') + chip('sort', 'rate-asc', '별점 낮은순')) +
     '</div>';
@@ -2478,12 +2495,17 @@ function buildReportHtml(movies, settings, opts) {
     "var rows=[].slice.call(document.querySelectorAll('#list .mv'));",
     "var list=document.getElementById('list');",
     "var cnt=document.getElementById('cnt');",
-    "var S={fmt:{},grp:{},own:'',fav:false,sort:'title'};",
+    "var S={fmt:{},grp:{},own:'',fav:false,series:false,sort:'title'};",
     "function any(o){for(var k in o){if(o[k])return true;}return false;}",
     "function sortRows(){",
     "var k=S.sort;var arr=rows.slice();",
     "arr.sort(function(a,b){",
     "var ta=a.getAttribute('data-title'),tb=b.getAttribute('data-title');",
+    "if(S.series){var sa=a.getAttribute('data-sname'),sb=b.getAttribute('data-sname');",
+    "if(sa!==sb)return sa.localeCompare(sb,'ko');",
+    "var oa=+a.getAttribute('data-sorder')||0,ob=+b.getAttribute('data-sorder')||0;",
+    "if(!oa&&ob)return 1;if(oa&&!ob)return -1;if(oa!==ob)return oa-ob;",
+    "return ta.localeCompare(tb,'ko');}",
     "var f=(k.indexOf('year')===0)?'data-year':((k.indexOf('rate')===0)?'data-rate':'');",
     "if(f){var x=+a.getAttribute(f)||0,y=+b.getAttribute(f)||0;",
     "if(!x&&y)return 1;if(x&&!y)return -1;",
@@ -2500,22 +2522,24 @@ function buildReportHtml(movies, settings, opts) {
     "if(ok&&S.own==='own'&&r.getAttribute('data-own')!=='1')ok=false;",
     "if(ok&&S.own==='wish'&&r.getAttribute('data-own')==='1')ok=false;",
     "if(ok&&S.fav&&r.getAttribute('data-fav')!=='1')ok=false;",
+    "if(ok&&S.series&&!r.getAttribute('data-sname'))ok=false;",
     "r.classList.toggle('hide',!ok);if(ok)n++;});",
     "cnt.textContent=n+'편';",
     "var es=document.querySelectorAll('#p-dvd .entry');",
     "for(var i=0;i<es.length;i++){es[i].classList.toggle('hide',!!t&&es[i].getAttribute('data-q').indexOf(t)<0);}",
     "counts('#p-dvd .slot');counts('#p-dvd .cat');counts('#p-dvd .sec');counts('#p-dvd .region');}",
     "function mark(g,fn){var cs=document.querySelectorAll('.chip[data-g=\"'+g+'\"]');for(var i=0;i<cs.length;i++){cs[i].classList.toggle('on',fn(cs[i].getAttribute('data-v')));}}",
+    "function markSt(){mark('st',function(x){return x===S.own||(x==='fav'&&S.fav)||(x==='series'&&S.series);});}",
     "document.querySelector('.fbar').addEventListener('click',function(e){",
     "var b=e.target.closest?e.target.closest('.chip'):null;if(!b)return;",
     "var g=b.getAttribute('data-g'),v=b.getAttribute('data-v');",
     "if(g==='sort'){S.sort=v;mark('sort',function(x){return x===v;});sortRows();}",
-    "else if(g==='st'){if(v==='fav'){S.fav=!S.fav;b.classList.toggle('on',S.fav);}else{S.own=(S.own===v)?'':v;mark('st',function(x){return x===S.own||(x==='fav'&&S.fav);});}}",
+    "else if(g==='st'){if(v==='fav'){S.fav=!S.fav;}else if(v==='series'){S.series=!S.series;sortRows();}else{S.own=(S.own===v)?'':v;}markSt();}",
     "else{S[g][v]=!S[g][v];b.classList.toggle('on',!!S[g][v]);}",
     "apply();});",
     "document.getElementById('reset').addEventListener('click',function(){",
-    "S.fmt={};S.grp={};S.own='';S.fav=false;q.value='';",
-    "mark('fmt',function(){return false;});mark('grp',function(){return false;});mark('st',function(){return false;});apply();});",
+    "S.fmt={};S.grp={};S.own='';S.fav=false;S.series=false;q.value='';",
+    "mark('fmt',function(){return false;});mark('grp',function(){return false;});markSt();sortRows();apply();});",
     "q.addEventListener('input',apply);",
     "var tabs=document.querySelectorAll('.tab');",
     "for(var i=0;i<tabs.length;i++){tabs[i].addEventListener('click',function(){",
@@ -2624,7 +2648,7 @@ function ExportModal({ movies, settings, onClose }) {
             </div>
             <p className="hint-text-small">
               {format === 'html'
-                ? '「전체 목록」(매체·보관·상태 필터, 정렬)과 「DVD 보관함」(외화 / 한국 / 개별 보관 목차와 칸별 정리) 두 탭으로 구성돼요. DVD가 아닌 영화는 매체·구매 플랫폼을 보관 위치로 표시해요. 더블클릭하면 맥의 Safari·Chrome에서 바로 열리고, 상단 검색창이나 ⌘F로 검색할 수 있어요. 영화를 누르면 줄거리·출연 등 상세가 펼쳐져요. 인쇄 → PDF 저장도 가능해요.'
+                ? '「전체 목록」(매체·보관·상태 필터, 시리즈만 보기, 정렬)과 「DVD 보관함」(외화 / 한국 / 개별 보관 목차와 칸별 정리) 두 탭으로 구성돼요. DVD가 아닌 영화는 매체·구매 플랫폼을 보관 위치로 표시해요. 더블클릭하면 맥의 Safari·Chrome에서 바로 열리고, 상단 검색창이나 ⌘F로 검색할 수 있어요. 영화를 누르면 줄거리·출연 등 상세가 펼쳐져요. 인쇄 → PDF 저장도 가능해요.'
                 : '영화·디스크 한 줄씩 정리한 표예요. 맥의 Numbers·엑셀에서 한글이 깨지지 않도록 저장돼요. 정렬·필터가 필요할 때 쓰세요.'}
             </p>
           </div>
@@ -3232,6 +3256,9 @@ const APP_CSS = `
         .heart-filter-btn { flex: none; width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; border: 1px solid var(--line); background: transparent; color: var(--ink-soft); cursor: pointer; transition: color 0.15s, background 0.15s, box-shadow 0.15s, border-color 0.15s; }
         .heart-filter-btn:hover { color: var(--accent); border-color: var(--accent-soft); }
         .heart-filter-btn.is-on { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); box-shadow: 0 0 9px color-mix(in srgb, var(--accent) 50%, transparent); }
+        .series-filter-btn { flex: none; height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--ink-soft); font-size: 12.5px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: color 0.15s, background 0.15s, border-color 0.15s; }
+        .series-filter-btn:hover { color: var(--accent); border-color: var(--accent-soft); }
+        .series-filter-btn.is-on { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
         .shelf-view { gap: 12px; }
         .shelf-orphan-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-radius: 10px; border: 1px solid color-mix(in srgb, #d9a441 55%, transparent); background: color-mix(in srgb, #d9a441 14%, transparent); color: var(--fg); font-size: 12.5px; line-height: 1.5; }
         .repair-row { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-bottom: 1px dashed var(--line); }
@@ -3544,6 +3571,7 @@ function MovieCollectionApp() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [favoriteOnly, setFavoriteOnly] = useState(false);
+  const [seriesOnly, setSeriesOnly] = useState(false);
   const [formatFilter, setFormatFilter] = useState([]);
   const [activeFilter, setActiveFilter] = useState(null);
   const [sortBy, setSortBy] = useState('recent');
@@ -3796,7 +3824,10 @@ function MovieCollectionApp() {
   }
 
   function handleAddCategory(section, number, name, description = '') {
-    if (settings.categories.some(c => c.section === section && c.number === number)) return;
+    if (settings.categories.some(c => c.section === section && Number(c.number) === Number(number))) {
+      window.alert(`${number}번은 이 섹션에서 이미 쓰고 있어요. 다른 번호를 입력해주세요.`);
+      return;
+    }
     persistSettings({ ...settings, categories: [...settings.categories, { id: uid(), section, number, name, description }] });
   }
 
@@ -4168,6 +4199,7 @@ function MovieCollectionApp() {
     let list = movies.filter(m => {
       if (statusFilter !== 'all' && m.status !== statusFilter) return false;
       if (favoriteOnly && !m.favorite) return false;
+      if (seriesOnly && !m.seriesId) return false;
       if (formatFilter.length > 0) {
         const formats = Array.isArray(m.formats) ? m.formats : [];
         const matchesFormat = formatFilter.some(f =>
@@ -4194,6 +4226,11 @@ function MovieCollectionApp() {
     });
     list = [...list].sort((a, b) => {
       if (activeFilter?.type === 'series') return (Number(a.seriesOrder) || 0) - (Number(b.seriesOrder) || 0);
+      if (seriesOnly) {
+        const sn = String(a.seriesName || '').localeCompare(String(b.seriesName || ''), 'ko');
+        if (sn) return sn;
+        return (Number(a.seriesOrder) || 0) - (Number(b.seriesOrder) || 0);
+      }
       if (sortBy === 'rating-desc' || sortBy === 'rating-asc') {
         const ra = typeof a.rating === 'number' ? a.rating : null;
         const rb = typeof b.rating === 'number' ? b.rating : null;
@@ -4209,9 +4246,13 @@ function MovieCollectionApp() {
       return (b.createdAt || 0) - (a.createdAt || 0);
     });
     return list;
-  }, [movies, statusFilter, favoriteOnly, formatFilter, activeFilter, search, sortBy]);
+  }, [movies, statusFilter, favoriteOnly, seriesOnly, formatFilter, activeFilter, search, sortBy]);
 
-  const displayEntries = useMemo(() => buildDisplayEntries(filteredMovies, expandedSeries), [filteredMovies, expandedSeries]);
+  const effectiveExpanded = useMemo(
+    () => (seriesOnly ? new Set(filteredMovies.filter(m => m.seriesId).map(m => m.seriesId)) : expandedSeries),
+    [seriesOnly, filteredMovies, expandedSeries]
+  );
+  const displayEntries = useMemo(() => buildDisplayEntries(filteredMovies, effectiveExpanded), [filteredMovies, effectiveExpanded]);
   const totalPages = Math.max(1, Math.ceil(displayEntries.length / pageSize));
   const pageEntries = useMemo(() => {
     const start = (page - 1) * pageSize;
@@ -4220,7 +4261,7 @@ function MovieCollectionApp() {
 
   useEffect(() => {
     setPage(1);
-  }, [statusFilter, favoriteOnly, formatFilter, activeFilter, search, sortBy, viewMode, pageSize]);
+  }, [statusFilter, favoriteOnly, seriesOnly, formatFilter, activeFilter, search, sortBy, viewMode, pageSize]);
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
@@ -4325,6 +4366,15 @@ function MovieCollectionApp() {
             onClick={() => setFavoriteOnly(v => !v)}
           >
             <HeartIcon size={16} style={favoriteOnly ? { fill: 'currentColor' } : undefined} />
+          </button>
+          <button
+            type="button"
+            className={`series-filter-btn${seriesOnly ? ' is-on' : ''}`}
+            title={seriesOnly ? '시리즈만 묶어 보는 중 (누르면 전체)' : '시리즈 영화만 묶어서 보기'}
+            aria-pressed={seriesOnly}
+            onClick={() => setSeriesOnly(v => !v)}
+          >
+            시리즈만
           </button>
           </div>
         </div>
