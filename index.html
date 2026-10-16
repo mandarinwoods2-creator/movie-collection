@@ -640,7 +640,7 @@ const DECK_OPTS = [
 ];
 const GAME_FILTER_LABEL = {
   platform: '플랫폼', form: '보유 형태', korean: '한국어', deck: '스팀덱', genre: '장르',
-  developer: '개발사', publisher: '배급사', franchise: '프랜차이즈', lang: '언어', os: '운영체제', series: '시리즈',
+  developer: '개발사', publisher: '배급사', franchise: '프랜차이즈', lang: '언어', chinese: '언어', os: '운영체제', series: '시리즈',
 };
 const GAME_PLATFORM_OPTS = GAME_PLATFORMS.map(p => ({ key: p, label: p }));
 const isGame = m => !!m && m.type === 'game';
@@ -1006,7 +1006,7 @@ function resolveSeriesId(existingId, name, ownId, movies) {
 // 같은 시리즈에 속한 영화는 항상 한데 묶어서 배치한다.
 // expandedSeries에 없는 시리즈는 'series-bundle' 항목 하나로 접혀서 표시되고,
 // expandedSeries에 있는 시리즈는 'series-header' + 개별 'movie' 항목들로 펼쳐진다.
-function buildDisplayEntries(list, expandedSeries) {
+function buildDisplayEntries(list, expandedSeries, comparator=null) {
   const seen = new Set();
   const entries = [];
   for (const m of list) {
@@ -1014,7 +1014,7 @@ function buildDisplayEntries(list, expandedSeries) {
     if (m.seriesId) {
       const group = list
         .filter(x => x.seriesId === m.seriesId)
-        .sort((a, b) => (Number(a.seriesOrder) || 0) - (Number(b.seriesOrder) || 0));
+        .sort(comparator||((a,b)=>(Number(a.seriesOrder)||999999)-(Number(b.seriesOrder)||999999)));
       group.forEach(g => seen.add(g.id));
       if (expandedSeries.has(m.seriesId)) {
         // 펼친 시리즈는 하나의 독립 블록으로 묶는다.
@@ -2366,7 +2366,7 @@ function reportRow(m, secMap, opts) {
     '<div class="fm">' + fm.map(f => '<span class="pill">' + reportEsc(f) + '</span>').join('') + '</div></div></summary>' +
     '<div class="dd"><dl>' + (rows.join('') || '<dt></dt><dd class="mute">추가 정보 없음</dd>') + '</dl></div></details>';
 }
-function buildReportHtml(movies, settings, opts) {
+function buildMovieReportHtml(movies, settings, opts) {
   const d = new Date();
   const today = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   const secMap = new Map(settings.sections.map(s => [s.name, s]));
@@ -2618,7 +2618,7 @@ function buildReportHtml(movies, settings, opts) {
     '<section id="p-dvd" class="panel off"><div class="toc">' + tocHtml + '</div>' + shelf + indivHtml + '</section></main>' +
     '<scr' + 'ipt>' + js + '<' + '/script></body></html>';
 }
-function buildCsv(movies, settings) {
+function buildMovieCsv(movies, settings) {
   const secMap = new Map(settings.sections.map(s => [s.name, s]));
   const header = ['구분', '섹션', '카테고리번호', '카테고리', '칸번호', '디스크', '디스크내용', '함께수록', '제목', '원제', '연도', '국가', '장르', '상영시간', '관람등급', '감독', '출연', '별점', '하트', '보유상태', '매체', '시리즈', '시리즈순서', '해시태그', '메모', '줄거리'];
   const rows = [];
@@ -2656,11 +2656,19 @@ function buildCsv(movies, settings) {
   const lines = [header.map(cell).join(',')].concat(rows.map(r => r.cells.map(cell).join(',')));
   return String.fromCharCode(0xFEFF) + lines.join(CR + LF);
 }
+
+function parseCollectionCsv(text){text=String(text).replace(/^\uFEFF/,'');const out=[];let row=[],v='',q=false;for(let i=0;i<text.length;i++){const c=text[i];if(q){if(c==='"'&&text[i+1]==='"'){v+='"';i++;}else if(c==='"')q=false;else v+=c;}else if(c==='"')q=true;else if(c===','){row.push(v);v='';}else if(c==='\r'||c==='\n'){if(c==='\r'&&text[i+1]==='\n')i++;row.push(v);out.push(row);row=[];v='';}else v+=c;}if(row.length||v){row.push(v);out.push(row);}return out;}
+function buildCsv(items,settings){const films=items.filter(m=>!isGame(m)),games=items.filter(isGame),header=parseCollectionCsv(buildMovieCsv([],settings))[0],extra=['플랫폼','보유 형태','운영체제','개발사','배급사','프랜차이즈','출시일','한국어 지원','그 외 지원 언어','스팀덱 호환','DLC 구매현황','DLC 상세(JSON)','포스터 URL','항목 ID','등록시각'];const rows=[['콘텐츠 종류',...header,...extra]];films.forEach(m=>parseCollectionCsv(buildMovieCsv([m],settings)).slice(1).forEach(r=>rows.push(['영화',...r,...Array(extra.length-3).fill(''),m.posterUrl||'',m.id||'',m.createdAt??''])));games.slice().sort((a,b)=>String(a.titleKr||'').localeCompare(String(b.titleKr||''),'ko')).forEach(g=>{const d=g.dlcs||[],values={'구분':'플랫폼','제목':g.titleKr,'원제':g.titleOriginal,'연도':g.year||(g.releaseDate||'').slice(0,4),'장르':(g.genres||[]).join(', '),'별점':g.rating??'','하트':g.favorite?'♥':'','보유상태':g.status==='wishlist'?'미보유':'보유','시리즈':g.seriesName||'','시리즈순서':g.seriesOrder??'','해시태그':(g.hashtags||[]).map(t=>'#'+t).join(' '),'메모':g.notes||'','줄거리':g.synopsis||''};rows.push(['게임',...header.map(h=>values[h]??''),(g.platforms||[]).join(', '),(g.ownForms||[]).join(', '),(g.os||[]).join(', '),g.developer||'',g.publisher||'',g.franchise||'',g.releaseDate||'',(KOREAN_OPTS.find(x=>x.key===g.korean)||{}).label||g.korean||'',(g.otherLangs||[]).join(', '),(DECK_OPTS.find(x=>x.key===g.deck)||{}).label||g.deck||'',d.filter(x=>x.owned).length+'/'+d.length+' 구매',JSON.stringify(d),g.posterUrl||'',g.id||'',g.createdAt??'']);});return '\uFEFF'+rows.map(r=>r.map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');}
+function reportGameRow(g,opts){const e=reportEsc,korean=(KOREAN_OPTS.find(x=>x.key===g.korean)||{}).label||g.korean||'',deck=(DECK_OPTS.find(x=>x.key===g.deck)||{}).label||g.deck||'',d=g.dlcs||[];const facts=[['출시일',g.releaseDate],['플랫폼',(g.platforms||[]).join(', ')],['보유 형태',(g.ownForms||[]).join(', ')],['운영체제',(g.os||[]).join(', ')],['개발사',g.developer],['배급사',g.publisher],['프랜차이즈',g.franchise],['장르',(g.genres||[]).join(', ')],['한국어 지원',korean],['그 외 지원 언어',(g.otherLangs||[]).join(', ')],['스팀덱 호환',deck],['게임 소개',g.synopsis],['메모',g.notes],['이미지 URL',g.posterUrl]];const q=[g.titleKr,g.titleOriginal,g.seriesName,...facts.map(x=>x[1]),...d.map(x=>x.name)].join(' ').toLowerCase();return '<details class="game-report-row" data-title="'+e(g.titleKr||'')+'" data-q="'+e(q)+'" data-platform="'+e((g.platforms||[]).join('|'))+'" data-status="'+(g.status==='wishlist'?'wishlist':'owned')+'" data-fav="'+(g.favorite?'1':'0')+'" data-series="'+e(g.seriesName||'')+'" data-date="'+e(g.releaseDate||'')+'" data-rating="'+(Number(g.rating)||0)+'"><summary>'+(opts.withPoster&&g.posterUrl?'<img src="'+e(g.posterUrl)+'" loading="lazy" alt="">':'')+'<div><b>'+e(g.titleKr||'제목 없음')+'</b> <small>'+e(g.titleOriginal||'')+'</small><div>'+e((g.platforms||[]).join(' · '))+'</div>'+(g.seriesName?'<div>시리즈 · '+e(g.seriesName)+(g.seriesOrder!==''&&g.seriesOrder!=null?' #'+e(g.seriesOrder):'')+'</div>':'')+'</div><span>'+(g.rating?'★ '+e(g.rating):'')+(g.favorite?' ♥':'')+(g.status==='wishlist'?' 미보유':'')+'</span></summary><div class="game-report-details"><dl>'+facts.filter(x=>x[1]).map(([k,v])=>'<dt>'+e(k)+'</dt><dd>'+e(v)+'</dd>').join('')+'</dl><h4>DLC '+d.filter(x=>x.owned).length+'/'+d.length+' 구매</h4><ul>'+d.map(x=>'<li><span>'+e(x.name||'')+'</span><span>'+(x.owned?'구매':'미구매')+'</span></li>').join('')+'</ul></div></details>';}
+function reportGameRuntime(){const q=document.getElementById('q'),list=document.getElementById('game-report-list'),rows=[...list.querySelectorAll('.game-report-row')];function apply(){const query=q.value.trim().toLowerCase(),p=document.getElementById('game-platform').value,st=document.getElementById('game-status').value,fav=document.getElementById('game-fav').checked,series=document.getElementById('game-series').checked,k=document.getElementById('game-sort').value;rows.forEach(r=>{r.hidden=!!((query&&!r.dataset.q.includes(query))||(p&&!r.dataset.platform.split('|').includes(p))||(st&&st!==r.dataset.status)||(fav&&r.dataset.fav!=='1')||(series&&!r.dataset.series));list.appendChild(r);});list.querySelectorAll('.game-report-group').forEach(g=>g.remove());const a=rows.filter(r=>!r.hidden).sort((a,b)=>{if(k==='title')return a.dataset.title.localeCompare(b.dataset.title,'ko');const f=k.startsWith('date')?'date':'rating',x=f==='rating'?+a.dataset[f]:a.dataset[f],y=f==='rating'?+b.dataset[f]:b.dataset[f];if(!x)return y?1:0;if(!y)return -1;const d=f==='rating'?x-y:x.localeCompare(y);return k.endsWith('desc')?-d:d;});if(series){const gs=new Map();a.forEach(r=>{if(!gs.has(r.dataset.series))gs.set(r.dataset.series,[]);gs.get(r.dataset.series).push(r);});gs.forEach((rs,n)=>{const g=document.createElement('details'),h=document.createElement('summary');g.className='game-report-group';h.textContent=n+' · '+rs.length+'개';g.appendChild(h);rs.forEach(r=>g.appendChild(r));list.appendChild(g);});}else a.forEach(r=>list.appendChild(r));document.getElementById('game-count').textContent=a.length+'개';}q.addEventListener('input',apply);['game-platform','game-status','game-fav','game-series','game-sort'].forEach(id=>document.getElementById(id).addEventListener('change',apply));document.getElementById('game-collapse').onclick=()=>list.querySelectorAll('details').forEach(d=>d.open=false);document.getElementById('game-reset').onclick=()=>{document.getElementById('game-platform').value='';document.getElementById('game-status').value='';document.getElementById('game-fav').checked=false;document.getElementById('game-series').checked=false;q.value='';q.dispatchEvent(new Event('input'));apply();};window.addEventListener('beforeprint',()=>list.querySelectorAll('details').forEach(d=>d.open=true));apply();if(!document.querySelector('#list .mv'))document.querySelector('.tab[data-t="p-games"]').click();}
+function buildReportHtml(items,settings,opts={}){const films=items.filter(x=>!isGame(x)),games=items.filter(isGame);let html=buildMovieReportHtml(films,settings,opts).replace('<title>영화 컬렉션 ','<title>컬렉션 ').replace('<h1 class="ttl">영화 컬렉션</h1>','<h1 class="ttl">컬렉션</h1>').replace('>전체 목록 '+films.length+'편</button>','>영화 '+films.length+'편</button>');const pos=html.indexOf('</div>',html.indexOf('<div class="tabs">'));html=html.slice(0,pos)+'<button type="button" class="tab" data-t="p-games">게임 '+games.length+'개</button>'+html.slice(pos);const platforms=[...new Set(games.flatMap(g=>g.platforms||[]))],panel='<section id="p-games" class="panel off"><div class="fbar"><div class="frow"><span class="fl">플랫폼</span><select id="game-platform"><option value="">전체</option>'+platforms.map(p=>'<option value="'+reportEsc(p)+'">'+reportEsc(p)+'</option>').join('')+'</select></div><div class="frow"><span class="fl">상태</span><select id="game-status"><option value="">전체</option><option value="owned">보유</option><option value="wishlist">미보유</option></select><label><input type="checkbox" id="game-fav">♥</label><label><input type="checkbox" id="game-series">시리즈</label></div><div class="frow"><span class="fl">정렬</span><select id="game-sort"><option value="title">이름순</option><option value="date-desc">출시일 최신순</option><option value="date-asc">출시일 오래된순</option><option value="rating-desc">별점 높은순</option><option value="rating-asc">별점 낮은순</option></select><button id="game-collapse">모두 접기</button><button id="game-reset">필터 초기화</button></div></div><p id="game-count">'+games.length+'개</p><div id="game-report-list">'+games.slice().sort((a,b)=>String(a.titleKr||'').localeCompare(String(b.titleKr||''),'ko')).map(g=>reportGameRow(g,opts)).join('')+'</div></section>';html=html.replace('</main>',panel+'</main>');const css='.game-report-row[hidden]{display:none!important}.game-report-row,.game-report-group{background:var(--card);border:1px solid var(--line);border-radius:12px;margin:7px 0}.game-report-row>summary{display:flex;align-items:center;gap:12px;padding:12px;cursor:pointer}.game-report-row>summary>div{flex:1;min-width:0;overflow-wrap:anywhere}.game-report-row img{width:44px;height:66px;object-fit:contain}.game-report-details{padding:0 18px 16px}.game-report-details dd{white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}.game-report-details ul{padding:0;list-style:none}.game-report-details li{display:flex;gap:12px;padding:7px 0;border-bottom:1px solid var(--line)}.game-report-details li>span:first-child{flex:1;min-width:0;overflow-wrap:anywhere}.game-report-details li>span:last-child{flex:none}.game-report-group>summary{padding:14px;cursor:pointer;font-weight:700}#p-games select,#p-games button{font:inherit;padding:5px 9px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:7px}#p-games .frow{flex-wrap:wrap;align-items:center}#p-games input[type=checkbox]{width:auto}';html=html.replace('</style>',css+'</style>');return html.replace('</body>','<scr'+'ipt>('+reportGameRuntime.toString()+')();<'+'/script></body>');}
+
 function ExportModal({ movies, settings, onClose }) {
   const [format, setFormat] = useState('html');
   const [includeWishlist, setIncludeWishlist] = useState(true);
   const [withPoster, setWithPoster] = useState(true);
-  const list = includeWishlist ? movies : movies.filter(m => m.status !== 'wishlist');
+  const [scope,setScope]=useState('all');
+  const list=movies.filter(m=>(includeWishlist||m.status!=='wishlist')&&(scope==='all'||(scope==='game'?isGame(m):!isGame(m))));
   function handleDownload() {
     const d = new Date();
     const stamp = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -2668,10 +2676,10 @@ function ExportModal({ movies, settings, onClose }) {
     let name;
     if (format === 'html') {
       blob = new Blob([buildReportHtml(list, settings, { withPoster })], { type: 'text/html;charset=utf-8' });
-      name = '영화컬렉션_' + stamp + '.html';
+      name = '컬렉션_' + stamp + '.html';
     } else {
       blob = new Blob([buildCsv(list, settings)], { type: 'text/csv;charset=utf-8' });
-      name = '영화컬렉션_' + stamp + '.csv';
+      name = '컬렉션_' + stamp + '.csv';
     }
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -2688,7 +2696,7 @@ function ExportModal({ movies, settings, onClose }) {
           <h2>문서로 내보내기</h2>
           <button type="button" className="icon-btn" onClick={onClose}><X size={18} /></button>
         </div>
-        <div className="drawer__body">
+        <div className="drawer__body"><label className="field"><span>내보낼 항목</span><select value={scope} onChange={e=>setScope(e.target.value)}><option value="all">전체 (영화 + 게임)</option><option value="movie">영화</option><option value="game">게임</option></select></label>
           <div className="field">
             <span>형식</span>
             <div className="segmented">
@@ -2696,14 +2704,12 @@ function ExportModal({ movies, settings, onClose }) {
               <button type="button" className={format === 'csv' ? 'is-active' : ''} onClick={() => setFormat('csv')}>표 (CSV)</button>
             </div>
             <p className="hint-text-small">
-              {format === 'html'
-                ? '「전체 목록」(매체·보관·상태 필터, 시리즈만 보기, 정렬)과 「DVD 보관함」(외화 / 한국 / 개별 보관 목차와 칸별 정리) 두 탭으로 구성돼요. DVD가 아닌 영화는 매체·구매 플랫폼을 보관 위치로 표시해요. 더블클릭하면 맥의 Safari·Chrome에서 바로 열리고, 상단 검색창이나 ⌘F로 검색할 수 있어요. 영화를 누르면 줄거리·출연 등 상세가 펼쳐져요. 인쇄 → PDF 저장도 가능해요.'
-                : '영화·디스크 한 줄씩 정리한 표예요. 맥의 Numbers·엑셀에서 한글이 깨지지 않도록 저장돼요. 정렬·필터가 필요할 때 쓰세요.'}
+              {format === 'html' ? '영화·DVD 보관함·게임 탭으로 구성됩니다. 게임의 플랫폼, 운영체제, 개발·배급사, 출시일, 언어, 스팀덱 호환, DLC 이름과 구매 여부를 포함합니다.' : '영화·게임 구분과 게임 전용 항목을 포함합니다. 영화는 디스크별 한 줄, 게임은 항목당 한 줄이며 DLC 상세는 JSON으로 보존합니다.'}
             </p>
           </div>
           <label className="checkbox-row">
             <input type="checkbox" checked={includeWishlist} onChange={e => setIncludeWishlist(e.target.checked)} />
-            미보유(위시리스트) 영화도 포함
+            미보유(위시리스트) 항목도 포함
           </label>
           {format === 'html' && (
             <label className="checkbox-row">
@@ -2711,7 +2717,7 @@ function ExportModal({ movies, settings, onClose }) {
               포스터 이미지 포함 (보려면 인터넷 연결이 필요해요)
             </label>
           )}
-          <p className="hint-text-small">내보낼 영화: {list.length}편 (등록된 최종 정보 기준)</p>
+          <p className="hint-text-small">내보낼 항목: 영화 {list.filter(m=>!isGame(m)).length}편 · 게임 {list.filter(isGame).length}개 (총 {list.length}개)</p>
         </div>
         <div className="drawer__foot">
           <div className="drawer__foot-actions">
@@ -2841,10 +2847,7 @@ function gameBadges(g) {
   plats.forEach(p => out.push({ t: p, c: 'gbadge--plat', f: { type: 'platform', value: p, label: p } }));
   (g.ownForms || []).forEach(f => out.push({ t: f === '패키지' ? `패키지(${packageLabel(plats)})` : f, c: '', f: { type: 'form', value: f, label: f === '패키지' ? `패키지(${packageLabel(plats)})` : f } }));
   if (plats.includes('Steam')) (g.os || []).forEach(o => out.push({ t: o, c: '', f: { type: 'os', value: o, label: o } }));
-  if (g.korean === 'official') out.push({ t: '공식 한글화', c: 'gbadge--good', f: { type: 'korean', value: 'official', label: '공식 한글화' } });
-  else if (g.korean === 'patch') out.push({ t: '유저 한글패치', c: 'gbadge--warn', f: { type: 'korean', value: 'patch', label: '유저 한글패치' } });
-  else if (g.korean === 'none') out.push({ t: '한국어 없음', c: 'gbadge--bad', f: { type: 'korean', value: 'none', label: '한국어 없음' } });
-  (g.otherLangs || []).forEach(l => out.push({ t: l, c: '', f: { type: 'lang', value: l, label: l } }));
+  const language=representativeGameLanguage(g);if(language)out.push(language);
   if (plats.includes('Steam') && g.deck && DECK_BADGE[g.deck]) out.push({ t: DECK_BADGE[g.deck][0], c: DECK_BADGE[g.deck][1], f: { type: 'deck', value: g.deck, label: DECK_BADGE[g.deck][0] } });
   return out;
 }
@@ -2881,106 +2884,29 @@ function GameLink({ type, value, onFilter }) {
   );
 }
 
-function GameCard({ game, onEdit, onFilter }) {
-  const badges = gameBadges(game);
-  const dlcs = game.dlcs || [];
-  const dlcOwned = dlcs.filter(d => d.owned).length;
-  const sameMaker = game.developer && game.publisher && game.developer === game.publisher;
-  const hasMaker = !!(game.developer || game.publisher);
-  return (
-    <div className="gcard" role="button" tabIndex={0} onClick={() => onEdit(game)} onKeyDown={e => { if (e.key === 'Enter') onEdit(game); }}>
-      <GameImage url={game.posterUrl}>
-        {game.status === 'wishlist' && <span className="gcard__wish">미보유</span>}
-        <HeartButton movie={game} />
-      </GameImage>
-      <div className="gcard__body">
-        <div className="gcard__title">{game.titleKr}{game.titleOriginal && <small>{game.titleOriginal}</small>}</div>
-        {game.seriesName && (
-          <div className="gcard__meta">
-            시리즈 ·{' '}
-            <button
-              type="button"
-              className="glink"
-              title={`${game.seriesName} 시리즈 모아보기`}
-              onClick={e => { e.stopPropagation(); onFilter('series', game.seriesId, game.seriesName); }}
-            >
-              {game.seriesName}{game.seriesOrder !== '' && game.seriesOrder != null ? ` #${game.seriesOrder}` : ''}
-            </button>
-          </div>
-        )}
-        {(hasMaker || game.releaseDate) && (
-          <div className="gcard__meta">
-            {sameMaker ? (
-              <span>개발·배급 <GameLink type="developer" value={game.developer} onFilter={onFilter} /></span>
-            ) : (
-              <>
-                {game.developer && <span>개발 <GameLink type="developer" value={game.developer} onFilter={onFilter} /></span>}
-                {game.developer && game.publisher && ' · '}
-                {game.publisher && <span>배급 <GameLink type="publisher" value={game.publisher} onFilter={onFilter} /></span>}
-              </>
-            )}
-            {hasMaker && game.releaseDate && ' · '}
-            {game.releaseDate && gameDateText(game.releaseDate)}
-          </div>
-        )}
-        {game.franchise && (
-          <div className="gcard__meta">프랜차이즈 · <GameLink type="franchise" value={game.franchise} onFilter={onFilter} /></div>
-        )}
-        {badges.length > 0 && (
-          <div className="gcard__badges">
-            {badges.map((b, i) => (
-              <button
-                key={i}
-                type="button"
-                className={`gbadge gbadge--link ${b.c}`}
-                title={`${b.t}(으)로 모아보기`}
-                onClick={e => { e.stopPropagation(); onFilter(b.f.type, b.f.value, b.f.label); }}
-              >
-                {b.t}
-              </button>
-            ))}
-          </div>
-        )}
-        {dlcs.length > 0 && (
-          <div className="gcard__badges">
-            <span className="gcard__meta">DLC {dlcOwned}/{dlcs.length} 구매</span>
-            {dlcs.map(d => (
-              <span key={d.id} className={`gbadge ${d.owned ? 'gbadge--good' : ''}`}>{d.name} · {d.owned ? '구매' : '미구매'}</span>
-            ))}
-          </div>
-        )}
-        {(game.genres || []).length > 0 && (
-          <div className="gcard__meta">
-            {game.genres.map((g, i) => (
-              <span key={g}>{i > 0 && ' · '}<GameLink type="genre" value={g} onFilter={onFilter} /></span>
-            ))}
-          </div>
-        )}
-        {game.synopsis && <div className="gcard__synopsis">{game.synopsis}</div>}
-        <StarRating value={game.rating} readOnly size={13} />
-      </div>
-    </div>
-  );
-}
 
-function GameTile({ game, onEdit }) {
-  return (
-    <div className="gtile" role="button" tabIndex={0} title={game.titleKr} onClick={() => onEdit(game)} onKeyDown={e => { if (e.key === 'Enter') onEdit(game); }}>
-      <GameImage url={game.posterUrl}>
-        {game.status === 'wishlist' && <span className="gcard__wish">미보유</span>}
-        <HeartButton movie={game} />
-      </GameImage>
-      <div className="gtile__overlay">
-        <span className="gtile__title">{game.titleKr}</span>
-        {(game.platforms || []).length > 0 && (
-          <span className="gtile__plats">
-            {game.platforms.map(p => <span key={p}>{p === 'Nintendo Switch' ? 'Switch' : p}</span>)}
-          </span>
-        )}
-      </div>
-    </div>
-  );
+function representativeGameLanguage(game){if(game.korean==='official')return {t:'공식 한글화',c:'gbadge--good',f:{type:'korean',value:'official',label:'공식 한글화'}};if(game.korean==='patch')return {t:'유저 한글패치',c:'gbadge--warn',f:{type:'korean',value:'patch',label:'유저 한글패치'}};for(const [rx,label] of [[/영어|English/i,'영어'],[/일본어|일어|Japanese/i,'일본어'],[/중국어|Chinese/i,'중국어']]){const v=(game.otherLangs||[]).find(l=>rx.test(l));if(v)return {t:label,c:'',f:{type:label==='중국어'?'chinese':'lang',value:label==='중국어'?'중국어':v,label}};}return null;}
+function compareCollectionItems(a,b,sort){const title=()=>String(a.titleKr||'').localeCompare(String(b.titleKr||''),'ko');if(sort==='title')return title();if(sort.startsWith('year')){const x=String(a.releaseDate||a.year||''),y=String(b.releaseDate||b.year||'');if(!x)return y?1:title();if(!y)return -1;return (sort==='year-desc'?y.localeCompare(x):x.localeCompare(y))||title();}if(sort.startsWith('rating')){const x=Number(a.rating)>0?Number(a.rating):null,y=Number(b.rating)>0?Number(b.rating):null;if(x===null)return y===null?title():1;if(y===null)return -1;return (sort==='rating-desc'?y-x:x-y)||title();}return (b.createdAt||0)-(a.createdAt||0)||title();}
+function GameDlcList({dlcs=[]}){return <ul className="game-dlc-list">{dlcs.map((d,i)=><li key={d.id||i}><span className="game-dlc-name">{d.name}</span><span className={`game-dlc-state${d.owned?' is-owned':''}`}>{d.owned?'구매':'미구매'}</span></li>)}</ul>;}
+function GameDlcDisclosure({dlcs=[]}){if(!dlcs.length)return null;return <details className="game-dlc-disclosure"><summary>DLC {dlcs.filter(d=>d.owned).length}/{dlcs.length} 구매</summary><GameDlcList dlcs={dlcs}/></details>;}
+function GameCard({game,onEdit,onFilter,onOpenDetail}){
+ const [introOpen,setIntroOpen]=useState(false);const anchor=React.useRef(null);const dlcs=game.dlcs||[];
+ useEffect(()=>{const close=()=>setIntroOpen(false);window.addEventListener('collection:collapse-game-popovers',close);return ()=>window.removeEventListener('collection:collapse-game-popovers',close);},[]);
+ useEffect(()=>{if(!introOpen)return;const outside=e=>{if(anchor.current&&!anchor.current.contains(e.target))setIntroOpen(false);};const key=e=>{if(e.key==='Escape')setIntroOpen(false);};document.addEventListener('pointerdown',outside);window.addEventListener('keydown',key);return ()=>{document.removeEventListener('pointerdown',outside);window.removeEventListener('keydown',key);};},[introOpen]);
+ const open=()=> (onOpenDetail||onEdit)(game);
+ return <article className={`gcard${introOpen?' gcard--popover-open':''}`}>
+ <button type="button" className="gcard__cover" aria-label={`${game.titleKr} 정보 보기`} onClick={open}><GameImage url={game.posterUrl}/></button><div className="gcard__body">
+ <div className="gcard__top"><button type="button" className="gcard__title-button" onClick={open}>{game.titleKr}</button><span className="card__actions"><HeartButton movie={game}/><button type="button" className="icon-btn icon-btn--ghost" title="편집" aria-label="편집" onClick={()=>onEdit(game)}><Pencil size={15}/></button></span></div>
+ {game.titleOriginal&&game.titleOriginal!==game.titleKr&&<div className="gcard__meta">{game.titleOriginal}</div>}{game.status==='wishlist'&&<div className="gcard__meta">미보유</div>}
+ {game.seriesName&&<div className="gcard__meta">시리즈 · <button type="button" className="glink" onClick={()=>onFilter('series',game.seriesId,game.seriesName)}>{game.seriesName}{game.seriesOrder!==''&&game.seriesOrder!=null?` #${game.seriesOrder}`:''}</button></div>}
+ <div className="gcard__badges">{gameBadges(game).map((b,i)=><button key={i} type="button" className={`gbadge gbadge--link ${b.c}`} onClick={()=>onFilter(b.f.type,b.f.value,b.f.label)}>{b.t}</button>)}</div>
+ {dlcs.length>0&&<section className="game-dlc-inline"><div className="gcard__meta">DLC {dlcs.filter(d=>d.owned).length}/{dlcs.length} 구매</div><GameDlcList dlcs={dlcs}/></section>}
+ {!!(game.genres||[]).length&&<div className="gcard__meta">{game.genres.map((g,i)=><span key={g}>{i>0&&' · '}<GameLink type="genre" value={g} onFilter={onFilter}/></span>)}</div>}
+ {game.synopsis&&<div className="more-info game-card-popovers" ref={anchor}><button type="button" className={`more-info__toggle game-popover-toggle${introOpen?' game-popover-toggle--open':''}`} aria-expanded={introOpen} aria-controls={`game-intro-${game.id}`} onClick={()=>setIntroOpen(v=>!v)}>게임 소개 <span aria-hidden="true">{introOpen?'⌃':'⌄'}</span></button>{introOpen&&<div id={`game-intro-${game.id}`} className="more-info__body game-popover-body" role="region" aria-label="게임 소개"><div className="more-info__block"><b>게임 소개</b><p>{game.synopsis}</p></div></div>}</div>}
+ <StarRating value={game.rating} readOnly size={13}/></div></article>;
 }
+function GameTile({game,onEdit,onOpenDetail}){return <button type="button" className="gtile game-poster-only" title={game.titleKr} aria-label={`${game.titleKr} 정보 보기`} onClick={()=> (onOpenDetail||onEdit)(game)}><GameImage url={game.posterUrl}/></button>;}
+function GameDetailModal({game,onClose,onEdit,onFilter}){const filter=(...args)=>{onClose();onFilter(...args);};const facts=[['출시일',gameDateText(game.releaseDate)],['플랫폼',(game.platforms||[]).join(', ')],['보유 형태',(game.ownForms||[]).join(', ')],['운영체제',(game.os||[]).join(', ')],['개발사',game.developer],['배급사',game.publisher],['프랜차이즈',game.franchise],['스팀덱',(DECK_OPTS.find(o=>o.key===game.deck)||{}).label],['한국어',(KOREAN_OPTS.find(o=>o.key===game.korean)||{}).label],['지원 언어',(game.otherLangs||[]).join(', ')]];return <div className="drawer-backdrop" onClick={onClose}><div className="drawer" onClick={e=>e.stopPropagation()} role="dialog" aria-modal="true" aria-label="게임 정보"><div className="drawer__head"><h2>게임 정보</h2><button type="button" className="icon-btn" onClick={onClose}><X size={18}/></button></div><div className="drawer__body"><div className="game-detail-head"><div className="game-detail-cover"><GameImage url={game.posterUrl}/></div><div className="game-detail-title"><h3>{game.titleKr}</h3>{game.titleOriginal&&<div className="detail-sub">{game.titleOriginal}</div>}<StarRating value={game.rating} readOnly size={15}/><div><HeartButton movie={game}/></div><span className="detail-sub">{game.status==='wishlist'?'미보유':'보유'}</span></div></div>{game.seriesName&&<div className="detail-section"><span className="detail-label">시리즈</span><button type="button" className="glink" onClick={()=>filter('series',game.seriesId,game.seriesName)}>{game.seriesName}{game.seriesOrder!==''&&game.seriesOrder!=null?` #${game.seriesOrder}`:''}</button></div>}{facts.filter(([,v])=>v).map(([label,value])=><div className="detail-section" key={label}><span className="detail-label">{label}</span><span className="detail-text">{value}</span></div>)}{!!(game.genres||[]).length&&<div className="detail-section"><span className="detail-label">장르</span><div className="detail-tags">{game.genres.map(g=><GameLink key={g} type="genre" value={g} onFilter={filter}/>)}</div></div>}<GameDlcDisclosure dlcs={game.dlcs}/>{game.synopsis&&<div className="detail-section"><span className="detail-label">게임 소개</span><div className="detail-text">{game.synopsis}</div></div>}{game.notes&&<div className="detail-section"><span className="detail-label">메모</span><div className="detail-text">{game.notes}</div></div>}</div><div className="drawer__foot"><div className="drawer__foot-actions"><button type="button" className="btn btn--ghost" onClick={onClose}>닫기</button><button type="button" className="btn btn--primary" onClick={()=>onEdit(game)}><Pencil size={14}/> 편집</button></div></div></div></div>;}
 
 function GameSeriesBundle({ entry, tile, onToggle }) {
   const rep = entry.movies[0];
@@ -2989,11 +2915,9 @@ function GameSeriesBundle({ entry, tile, onToggle }) {
     return (
       <div className="gtile" role="button" tabIndex={0} title={`${entry.seriesName} (${entry.movies.length}개) 펼치기`} onClick={open} onKeyDown={e => { if (e.key === 'Enter') open(); }}>
         <GameImage url={rep && rep.posterUrl}>
-          <span className="gseries-count">{entry.movies.length}개</span>
+          
         </GameImage>
-        <div className="gtile__overlay">
-          <span className="gtile__title">{entry.seriesName}</span>
-        </div>
+
       </div>
     );
   }
@@ -3011,7 +2935,7 @@ function GameSeriesBundle({ entry, tile, onToggle }) {
   );
 }
 
-function GameSeriesBlock({ entry, tile, onToggle, onEdit, onFilter }) {
+function GameSeriesBlock({ entry, tile, onToggle, onEdit, onFilter, onOpenDetail }) {
   return (
     <div className="gseries-block">
       <button type="button" className="series-header-bar" onClick={() => onToggle(entry.seriesId)}>
@@ -3021,8 +2945,8 @@ function GameSeriesBlock({ entry, tile, onToggle, onEdit, onFilter }) {
       </button>
       <div className={tile ? 'game-gallery' : 'game-grid'}>
         {entry.movies.map(g => (tile
-          ? <GameTile key={g.id} game={g} onEdit={onEdit} />
-          : <GameCard key={g.id} game={g} onEdit={onEdit} onFilter={onFilter} />
+          ? <GameTile key={g.id} game={g} onEdit={onEdit} onOpenDetail={onOpenDetail} />
+          : <GameCard key={g.id} game={g} onEdit={onEdit} onFilter={onFilter} onOpenDetail={onOpenDetail} />
         ))}
       </div>
     </div>
@@ -3978,9 +3902,9 @@ const APP_CSS = `
         .gbadge--link { cursor: pointer; }
         .gbadge--link:hover { text-decoration: underline; filter: brightness(0.93); }
         .gbadge--plat { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
-        .gbadge--good { background: rgba(60, 160, 100, 0.16); color: #2f8a57; }
-        .gbadge--warn { background: rgba(217, 164, 65, 0.2); color: #9a6d12; }
-        .gbadge--bad { background: rgba(190, 70, 70, 0.14); color: #a8433f; }
+        .gbadge--good { background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent); }
+        .gbadge--warn { background:color-mix(in srgb,var(--gold) 18%,transparent);color:var(--ink-soft); }
+        .gbadge--bad { background:color-mix(in srgb,var(--accent) 8%,transparent);color:var(--ink-soft); }
         .glink { background: none; border: none; padding: 0; margin: 0; color: inherit; font: inherit; cursor: pointer; }
         .glink:hover { color: var(--accent); text-decoration: underline; }
         .gcard__synopsis { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
@@ -3998,6 +3922,14 @@ const APP_CSS = `
         .gseries-count { position: absolute; top: 8px; right: 8px; z-index: 2; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; background: var(--gold); color: var(--bg); }
         .gseries-block { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 10px; border: 1px dashed color-mix(in srgb, var(--gold) 55%, transparent); border-radius: 14px; padding: 10px; }
         .collapse-all-btn { white-space: nowrap; }
+
+        .topbar>.segmented--view{display:inline-flex;flex-direction:row;flex:none;white-space:nowrap}.topbar>.segmented--view button{flex:none;min-width:max-content;white-space:nowrap;word-break:keep-all}.topbar>.sort-select{flex:none;white-space:nowrap}.type-tabs,.sidebar-section>.segmented{flex:none}.type-tabs button,.sidebar-section>.segmented button{white-space:nowrap;word-break:keep-all}
+        .gcard{align-items:flex-start;cursor:default;overflow:visible}.gcard>.game-img,.gcard__cover{align-self:flex-start}.gcard[role="button"]>.game-img{border-radius:11px 0 0 11px}.gcard__cover{display:block;flex:0 0 176px;width:176px;max-width:42%;padding:0;border:0;background:transparent;border-radius:11px 0 0 11px;overflow:hidden}.gcard__cover .game-img{width:100%;aspect-ratio:2/3}.game-img img{object-fit:contain;object-position:center}.gcard__top{display:flex;align-items:flex-start;gap:6px;min-width:0}.gcard__title-button{flex:1;min-width:0;padding:0;background:none;border:0;text-align:left;font:inherit;font-size:15px;font-weight:700;line-height:1.35;color:var(--ink);overflow-wrap:anywhere}.gcard__body{min-width:0}.gcard__badges{min-width:0;max-width:100%}.gcard__badges .gbadge{white-space:normal;overflow-wrap:anywhere;max-width:100%}
+        .gcard .card__actions,.card .card__actions{display:inline-flex;flex:none;align-items:center;align-self:flex-start;gap:2px;margin-left:auto}.gcard .card__actions .heart-btn,.card .card__actions .heart-btn{position:static;opacity:0;filter:none;color:var(--accent);background:transparent}.gcard:hover .card__actions .heart-btn,.card:hover .card__actions .heart-btn,.gcard:focus-within .card__actions .heart-btn,.card:focus-within .card__actions .heart-btn{opacity:1}.gcard .card__actions .icon-btn{color:var(--ink-soft)}.gcard .card__actions .icon-btn:hover{color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
+        .game-card-popovers{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0}.gcard--popover-open{z-index:50}.game-popover-toggle.more-info__toggle{width:auto;min-width:0;padding:0 10px;border-radius:999px;gap:5px;font-size:11.5px;white-space:nowrap;height:28px}.game-popover-toggle--open{background:color-mix(in srgb,var(--gold) 34%,transparent)}.game-card-popovers>.game-popover-body{position:absolute;top:calc(100% + 6px);left:0;right:0;z-index:60;max-height:230px;overflow-y:auto;overscroll-behavior:contain;min-width:0;overflow-wrap:anywhere}.game-popover-body .more-info__block{min-width:0}.game-popover-body p{white-space:pre-wrap;overflow-wrap:anywhere}
+        .game-dlc-inline{display:block;width:100%;min-width:0;max-width:100%}.game-dlc-disclosure{min-width:0;max-width:100%;font-size:12px;line-height:1.6}.game-dlc-disclosure>summary{cursor:pointer;color:var(--accent);font-weight:600;width:fit-content;border:1px solid var(--line);border-radius:999px;padding:4px 10px;background:color-mix(in srgb,var(--accent) 8%,transparent)}.game-dlc-list{list-style:none;padding:0;margin:7px 0 0;display:flex;flex-direction:column;gap:6px;min-width:0}.game-dlc-list li{display:flex;align-items:flex-start;gap:7px;padding:7px 8px;border-radius:8px;background:color-mix(in srgb,var(--accent) 5%,transparent);min-width:0;max-width:100%}.game-dlc-name{flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere;word-break:normal;color:var(--ink-soft);font-size:12px;line-height:1.55}.game-dlc-state{flex:none;white-space:nowrap;border-radius:999px;padding:1px 6px;background:var(--paper-2);color:var(--ink-soft);font-size:10.5px}.game-dlc-state.is-owned{background:color-mix(in srgb,var(--accent) 12%,var(--paper));color:var(--accent)}
+        .game-poster-only{display:block;width:100%;padding:0;border:0;line-height:0;background:var(--paper)}.game-poster-only .game-img{width:100%;aspect-ratio:2/3}.game-detail-head{display:flex;align-items:flex-start;gap:16px;min-width:0}.game-detail-cover{width:150px;max-width:40%;flex:none}.game-detail-title{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px}.game-detail-title h3{margin:0;line-height:1.4;color:var(--ink);overflow-wrap:anywhere}.game-detail-title .heart-btn,.game-detail-title .heart-btn.is-on{opacity:1;color:var(--accent)}.game-grid{grid-template-columns:repeat(auto-fill,minmax(min(400px,100%),1fr));align-items:start}.game-gallery{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));align-items:start}.gcard[role="button"]{cursor:pointer}.gcard__meta.gcard__clamp{white-space:normal;overflow-wrap:anywhere}
+        @media(hover:none){.gcard .card__actions .heart-btn,.card .card__actions .heart-btn{opacity:1}}@media(max-width:520px){.gcard__cover{flex-basis:130px;width:130px}.game-gallery{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}}
 `;
 
 function SaveStatus({ saving }) {
@@ -4286,6 +4218,8 @@ function MovieCollectionApp() {
   const [gameFilter, setGameFilter] = useState(null);
   const [gameFormOpen, setGameFormOpen] = useState(false);
   const [editingGame, setEditingGame] = useState(null);
+  const [gameDetailId,setGameDetailId]=useState(null);
+  const gameDetail=gameDetailId?gameItems.find(g=>g.id===gameDetailId)||null:null;
 
   const [formOpen, setFormOpen] = useState(false);
   const [editingMovie, setEditingMovie] = useState(null);
@@ -4931,27 +4865,7 @@ function MovieCollectionApp() {
       }
       return true;
     });
-    list = [...list].sort((a, b) => {
-      if (activeFilter?.type === 'series') return (Number(a.seriesOrder) || 0) - (Number(b.seriesOrder) || 0);
-      if (seriesOnly) {
-        const sn = String(a.seriesName || '').localeCompare(String(b.seriesName || ''), 'ko');
-        if (sn) return sn;
-        return (Number(a.seriesOrder) || 0) - (Number(b.seriesOrder) || 0);
-      }
-      if (sortBy === 'rating-desc' || sortBy === 'rating-asc') {
-        const ra = typeof a.rating === 'number' ? a.rating : null;
-        const rb = typeof b.rating === 'number' ? b.rating : null;
-        if (ra == null && rb == null) return (b.createdAt || 0) - (a.createdAt || 0);
-        if (ra == null) return 1;
-        if (rb == null) return -1;
-        if (ra !== rb) return sortBy === 'rating-desc' ? rb - ra : ra - rb;
-        return (b.createdAt || 0) - (a.createdAt || 0);
-      }
-      if (sortBy === 'year-asc') return (a.year || '').localeCompare(b.year || '');
-      if (sortBy === 'year-desc') return (b.year || '').localeCompare(a.year || '');
-      if (sortBy === 'title') return a.titleKr.localeCompare(b.titleKr, 'ko');
-      return (b.createdAt || 0) - (a.createdAt || 0);
-    });
+    list=[...list].sort((a,b)=>compareCollectionItems(a,b,sortBy));
     return list;
   }, [filmMovies, statusFilter, favoriteOnly, seriesOnly, formatFilter, activeFilter, search, sortBy]);
 
@@ -4973,6 +4887,7 @@ function MovieCollectionApp() {
         if (type === 'publisher' && g.publisher !== value) return false;
         if (type === 'franchise' && g.franchise !== value) return false;
         if (type === 'lang' && !(g.otherLangs || []).includes(value)) return false;
+ if(type==='chinese'&&!(g.otherLangs||[]).some(l=>/중국어|Chinese/i.test(l)))return false;
         if (type === 'os' && !(g.os || []).includes(value)) return false;
         if (type === 'series' && g.seriesId !== value) return false;
       }
@@ -4982,25 +4897,7 @@ function MovieCollectionApp() {
       }
       return true;
     });
-    return list.sort((a, b) => {
-      if (seriesOnly) {
-        const sn = String(a.seriesName || '').localeCompare(String(b.seriesName || ''), 'ko');
-        if (sn) return sn;
-        return (Number(a.seriesOrder) || 0) - (Number(b.seriesOrder) || 0);
-      }
-      if (sortBy === 'year-desc') return String(b.releaseDate || '').localeCompare(String(a.releaseDate || ''));
-      if (sortBy === 'year-asc') return String(a.releaseDate || '9999').localeCompare(String(b.releaseDate || '9999'));
-      if (sortBy === 'title') return String(a.titleKr || '').localeCompare(String(b.titleKr || ''), 'ko');
-      if (sortBy === 'rating-desc' || sortBy === 'rating-asc') {
-        const ra = typeof a.rating === 'number' ? a.rating : null;
-        const rb = typeof b.rating === 'number' ? b.rating : null;
-        if (ra == null && rb == null) return (b.createdAt || 0) - (a.createdAt || 0);
-        if (ra == null) return 1;
-        if (rb == null) return -1;
-        if (ra !== rb) return sortBy === 'rating-desc' ? rb - ra : ra - rb;
-      }
-      return (b.createdAt || 0) - (a.createdAt || 0);
-    });
+    return list.sort((a,b)=>compareCollectionItems(a,b,sortBy));
   }, [gameItems, statusFilter, favoriteOnly, seriesOnly, gamePlatformFilter, gameFilter, search, sortBy]);
 
   const gamePlatformCounts = useMemo(() => {
@@ -5018,13 +4915,16 @@ function MovieCollectionApp() {
   function switchType(t) {
     if (t === appType) return;
     setAppType(t);
+    setGameDetailId(null);
     setActiveFilter(null);
     setGameFilter(null);
     setSearch('');
     setSortBy('recent');
     setPage(1);
   }
+  function openGameDetail(g){setGameDetailId(g.id);}
   function openGameEdit(g) {
+    setGameDetailId(null);
     setEditingGame(g);
     setGameFormOpen(true);
   }
@@ -5033,15 +4933,7 @@ function MovieCollectionApp() {
     setSearch('');
   }
 
-  const displayEntries = useMemo(() => {
-    if (appType === 'game') {
-      const open = gameFilter && gameFilter.type === 'series'
-        ? new Set([...expandedSeries, gameFilter.value])
-        : expandedSeries;
-      return buildDisplayEntries(filteredGames, open);
-    }
-    return buildDisplayEntries(filteredMovies, expandedSeries);
-  }, [appType, filteredGames, filteredMovies, expandedSeries, gameFilter]);
+  const displayEntries=useMemo(()=>buildDisplayEntries(appType==='game'?filteredGames:filteredMovies,expandedSeries,(a,b)=>compareCollectionItems(a,b,sortBy)),[appType,filteredGames,filteredMovies,expandedSeries,sortBy]);
   const totalPages = Math.max(1, Math.ceil(displayEntries.length / pageSize));
   const pageEntries = useMemo(() => {
     const start = (page - 1) * pageSize;
@@ -5146,7 +5038,6 @@ function MovieCollectionApp() {
         </div>
         <hr />
         <div className="sidebar-section">
-          <h3>보유 상태</h3>
           <div className="segmented">
             <button type="button" className={statusFilter === 'all' ? 'is-active' : ''} onClick={() => setStatusFilter('all')}>전체</button>
             <button type="button" className={statusFilter === 'owned' ? 'is-active' : ''} onClick={() => setStatusFilter('owned')}>보유</button>
@@ -5160,16 +5051,16 @@ function MovieCollectionApp() {
               aria-pressed={favoriteOnly}
               onClick={() => setFavoriteOnly(v => !v)}
             >
-              <HeartIcon size={13} style={favoriteOnly ? { fill: 'currentColor' } : undefined} /> 하트
+              <HeartIcon size={13} style={favoriteOnly ? { fill: 'currentColor' } : undefined} />
             </button>
             <button
               type="button"
               className={`toggle-pill${seriesOnly ? ' is-on' : ''}`}
               title="시리즈로 등록된 항목만 보기 (접힌 상태로 표시돼요)"
               aria-pressed={seriesOnly}
-              onClick={() => setSeriesOnly(v => !v)}
+              onClick={() => {setSeriesOnly(v=>!v);setExpandedSeries(new Set());}}
             >
-              시리즈만
+              시리즈
             </button>
           </div>
         </div>
@@ -5205,7 +5096,7 @@ function MovieCollectionApp() {
             <input placeholder={appType === 'game' ? '게임명, 개발사, 배급사, 장르로 검색' : '제목, 감독, 배우, 태그로 검색'} value={search} onChange={e => { setSearch(e.target.value); setActiveFilter(null); setGameFilter(null); }} />
           </div>
           <SaveStatus saving={saving} />
-          <button type="button" className="icon-only-btn" onClick={() => setExportOpen(true)} title="문서로 내보내기" style={appType === 'game' ? { display: 'none' } : undefined}>
+          <button type="button" className="icon-only-btn" onClick={() => setExportOpen(true)} title="목록 내려받기" aria-label="목록 내려받기">
             <DownloadIcon size={16} />
           </button>
           {shelfModeOn && appType === 'movie' && (
@@ -5215,7 +5106,7 @@ function MovieCollectionApp() {
           )}
           <div className="segmented segmented--view">
             <button type="button" className={viewMode === 'card' ? 'is-active' : ''} onClick={() => setViewMode('card')}>카드</button>
-            <button type="button" className={viewMode === 'gallery' ? 'is-active' : ''} onClick={() => setViewMode('gallery')}>{appType === 'game' ? '이미지' : '포스터'}</button>
+            <button type="button" className={viewMode === 'gallery' ? 'is-active' : ''} onClick={() => setViewMode('gallery')}>포스터</button>
           </div>
           <button
             type="button"
@@ -5228,8 +5119,8 @@ function MovieCollectionApp() {
           <button
             type="button"
             className="btn btn--ghost collapse-all-btn"
-            onClick={() => setExpandedSeries(new Set())}
-            disabled={expandedSeries.size === 0}
+            onClick={() => {setExpandedSeries(new Set());window.dispatchEvent(new Event('collection:collapse-game-popovers'));}}
+            disabled={expandedSeries.size === 0 && appType !== 'game'}
             title="펼쳐 둔 시리즈를 한꺼번에 접어요"
             style={shelfModeOn && appType === 'movie' ? { display: 'none' } : undefined}
           >
@@ -5288,17 +5179,17 @@ function MovieCollectionApp() {
                   return <GameSeriesBundle key={`gb-${e.seriesId}`} entry={e} tile={viewMode === 'gallery'} onToggle={handleToggleSeries} />;
                 }
                 if (e.type === 'series-expanded') {
-                  return <GameSeriesBlock key={`gx-${e.seriesId}`} entry={e} tile={viewMode === 'gallery'} onToggle={handleToggleSeries} onEdit={openGameEdit} onFilter={openGameFilter} />;
+                  return <GameSeriesBlock key={`gx-${e.seriesId}`} entry={e} tile={viewMode === 'gallery'} onToggle={handleToggleSeries} onEdit={openGameEdit} onFilter={openGameFilter} onOpenDetail={openGameDetail} />;
                 }
                 return viewMode === 'gallery'
-                  ? <GameTile key={e.movie.id} game={e.movie} onEdit={openGameEdit} />
-                  : <GameCard key={e.movie.id} game={e.movie} onEdit={openGameEdit} onFilter={openGameFilter} />;
+                  ? <GameTile key={e.movie.id} game={e.movie} onEdit={openGameEdit} onOpenDetail={openGameDetail} />
+                  : <GameCard key={e.movie.id} game={e.movie} onEdit={openGameEdit} onFilter={openGameFilter} onOpenDetail={openGameDetail} />;
               })}
             </div>
           )
         ) : shelfModeOn ? (
           <ShelfView
-            movies={movies}
+            movies={filmMovies}
             settings={settings}
             viewMode={viewMode}
             shelfRegion={shelfRegion}
@@ -5369,7 +5260,7 @@ function MovieCollectionApp() {
       </main>
 
       {exportOpen && (
-        <ExportModal movies={filmMovies} settings={settings} onClose={() => setExportOpen(false)} />
+        <ExportModal movies={movies} settings={settings} onClose={() => setExportOpen(false)} />
       )}
 
       {repairOpen && (
@@ -5420,6 +5311,7 @@ function MovieCollectionApp() {
         />
       )}
 
+      {gameDetail&&!gameFormOpen&&<GameDetailModal game={gameDetail} onClose={()=>setGameDetailId(null)} onEdit={openGameEdit} onFilter={openGameFilter}/> }
       {gameFormOpen && (
         <GameForm
           key={editingGame ? editingGame.id : 'new-game'}
