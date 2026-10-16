@@ -2894,16 +2894,23 @@ function GameCard({game,onEdit,onFilter,onOpenDetail}){
  useEffect(()=>{const close=()=>setIntroOpen(false);window.addEventListener('collection:collapse-game-popovers',close);return ()=>window.removeEventListener('collection:collapse-game-popovers',close);},[]);
  useEffect(()=>{if(!introOpen)return;const outside=e=>{if(anchor.current&&!anchor.current.contains(e.target))setIntroOpen(false);};const key=e=>{if(e.key==='Escape')setIntroOpen(false);};document.addEventListener('pointerdown',outside);window.addEventListener('keydown',key);return ()=>{document.removeEventListener('pointerdown',outside);window.removeEventListener('keydown',key);};},[introOpen]);
  const open=()=> (onOpenDetail||onEdit)(game);
- return <article className={`gcard${introOpen?' gcard--popover-open':''}`}>
- <button type="button" className="gcard__cover" aria-label={`${game.titleKr} 정보 보기`} onClick={open}><GameImage url={game.posterUrl}/></button><div className="gcard__body">
- <div className="gcard__top"><button type="button" className="gcard__title-button" onClick={open}>{game.titleKr}</button><span className="card__actions"><HeartButton movie={game}/><button type="button" className="icon-btn icon-btn--ghost" title="편집" aria-label="편집" onClick={()=>onEdit(game)}><Pencil size={15}/></button></span></div>
- {game.titleOriginal&&game.titleOriginal!==game.titleKr&&<div className="gcard__meta">{game.titleOriginal}</div>}{game.status==='wishlist'&&<div className="gcard__meta">미보유</div>}
- {game.seriesName&&<div className="gcard__meta">시리즈 · <button type="button" className="glink" onClick={()=>onFilter('series',game.seriesId,game.seriesName)}>{game.seriesName}{game.seriesOrder!==''&&game.seriesOrder!=null?` #${game.seriesOrder}`:''}</button></div>}
- <div className="gcard__badges">{gameBadges(game).map((b,i)=><button key={i} type="button" className={`gbadge gbadge--link ${b.c}`} onClick={()=>onFilter(b.f.type,b.f.value,b.f.label)}>{b.t}</button>)}</div>
- {dlcs.length>0&&<section className="game-dlc-inline"><div className="gcard__meta">DLC {dlcs.filter(d=>d.owned).length}/{dlcs.length} 구매</div><GameDlcList dlcs={dlcs}/></section>}
- {!!(game.genres||[]).length&&<div className="gcard__meta">{game.genres.map((g,i)=><span key={g}>{i>0&&' · '}<GameLink type="genre" value={g} onFilter={onFilter}/></span>)}</div>}
- {game.synopsis&&<div className="more-info game-card-popovers" ref={anchor}><button type="button" className={`more-info__toggle game-popover-toggle${introOpen?' game-popover-toggle--open':''}`} aria-expanded={introOpen} aria-controls={`game-intro-${game.id}`} onClick={()=>setIntroOpen(v=>!v)}>게임 소개 <span aria-hidden="true">{introOpen?'⌃':'⌄'}</span></button>{introOpen&&<div id={`game-intro-${game.id}`} className="more-info__body game-popover-body" role="region" aria-label="게임 소개"><div className="more-info__block"><b>게임 소개</b><p>{game.synopsis}</p></div></div>}</div>}
- <StarRating value={game.rating} readOnly size={13}/></div></article>;
+  const owned=game.status!=='wishlist';
+  const seriesTxt=game.seriesName?<><Link2 size={11}/><button type="button" className="glink" onClick={()=>onFilter('series',game.seriesId,game.seriesName)}>{game.seriesName}{game.seriesOrder!==''&&game.seriesOrder!=null?` #${game.seriesOrder}`:''}</button></>:null;
+  return <article className={`gcard${introOpen?' gcard--popover-open':''}${owned?'':' gcard--unowned'}`}>
+ <button type="button" className="gcard__cover" aria-label={`${game.titleKr} 정보 보기`} onClick={open}><GameImage url={game.posterUrl}/>{!owned&&<span className="gcard__wish">미보유</span>}</button>
+ <div className="gcard__body">
+  <div className="gcard__head">
+   <div className="gcard__top"><button type="button" className="gcard__title-button" onClick={open}>{game.titleKr}</button><span className="card__actions"><HeartButton movie={game}/><button type="button" className="icon-btn icon-btn--ghost" title="편집" aria-label="편집" onClick={()=>onEdit(game)}><Pencil size={15}/></button></span></div>
+   {game.titleOriginal&&game.titleOriginal!==game.titleKr&&<div className="gcard__orig">{game.titleOriginal}</div>}
+   {(seriesTxt||!!(game.genres||[]).length)&&<div className="gcard__line">{seriesTxt&&<span className="gcard__series">{seriesTxt}</span>}{!!(game.genres||[]).length&&<span className="gcard__genres">{game.genres.map((g,i)=><span key={g}>{i>0&&' · '}<GameLink type="genre" value={g} onFilter={onFilter}/></span>)}</span>}</div>}
+  </div>
+  <div className="gcard__badges">{gameBadges(game).map((b,i)=><button key={i} type="button" className={`gbadge gbadge--link ${b.c}`} onClick={()=>onFilter(b.f.type,b.f.value,b.f.label)}>{b.t}</button>)}</div>
+  {game.synopsis&&<p className={`gcard__synopsis${dlcs.length?' gcard__synopsis--short':''}`}>{game.synopsis}</p>}
+  {dlcs.length>0&&<section className="game-dlc-inline"><div className="gcard__dlc-head"><span>DLC</span><em>{dlcs.filter(d=>d.owned).length}/{dlcs.length} 구매</em></div><GameDlcList dlcs={dlcs}/></section>}
+  <div className="gcard__foot"><StarRating value={game.rating} readOnly size={13}/>
+  {game.synopsis&&<div className="more-info game-card-popovers" ref={anchor}><button type="button" className={`more-info__toggle game-popover-toggle${introOpen?' game-popover-toggle--open':''}`} aria-expanded={introOpen} aria-controls={`game-intro-${game.id}`} onClick={()=>setIntroOpen(v=>!v)}>게임 소개 <span aria-hidden="true">{introOpen?'⌃':'⌄'}</span></button>{introOpen&&<div id={`game-intro-${game.id}`} className="more-info__body game-popover-body" role="region" aria-label="게임 소개"><div className="more-info__block"><b>게임 소개</b><p>{game.synopsis}</p></div></div>}</div>}
+  </div>
+ </div></article>;
 }
 function GameTile({game,onEdit,onOpenDetail}){return <button type="button" className="gtile game-poster-only" title={game.titleKr} aria-label={`${game.titleKr} 정보 보기`} onClick={()=> (onOpenDetail||onEdit)(game)}><GameImage url={game.posterUrl}/></button>;}
 function GameDetailModal({game,onClose,onEdit,onFilter}){const filter=(...args)=>{onClose();onFilter(...args);};const facts=[['출시일',gameDateText(game.releaseDate)],['플랫폼',(game.platforms||[]).join(', ')],['보유 형태',(game.ownForms||[]).join(', ')],['운영체제',(game.os||[]).join(', ')],['개발사',game.developer],['배급사',game.publisher],['프랜차이즈',game.franchise],['스팀덱',(DECK_OPTS.find(o=>o.key===game.deck)||{}).label],['한국어',(KOREAN_OPTS.find(o=>o.key===game.korean)||{}).label],['지원 언어',(game.otherLangs||[]).join(', ')]];return <div className="drawer-backdrop" onClick={onClose}><div className="drawer" onClick={e=>e.stopPropagation()} role="dialog" aria-modal="true" aria-label="게임 정보"><div className="drawer__head"><h2>게임 정보</h2><button type="button" className="icon-btn" onClick={onClose}><X size={18}/></button></div><div className="drawer__body"><div className="game-detail-head"><div className="game-detail-cover"><GameImage url={game.posterUrl}/></div><div className="game-detail-title"><h3>{game.titleKr}</h3>{game.titleOriginal&&<div className="detail-sub">{game.titleOriginal}</div>}<StarRating value={game.rating} readOnly size={15}/><div><HeartButton movie={game}/></div><span className="detail-sub">{game.status==='wishlist'?'미보유':'보유'}</span></div></div>{game.seriesName&&<div className="detail-section"><span className="detail-label">시리즈</span><button type="button" className="glink" onClick={()=>filter('series',game.seriesId,game.seriesName)}>{game.seriesName}{game.seriesOrder!==''&&game.seriesOrder!=null?` #${game.seriesOrder}`:''}</button></div>}{facts.filter(([,v])=>v).map(([label,value])=><div className="detail-section" key={label}><span className="detail-label">{label}</span><span className="detail-text">{value}</span></div>)}{!!(game.genres||[]).length&&<div className="detail-section"><span className="detail-label">장르</span><div className="detail-tags">{game.genres.map(g=><GameLink key={g} type="genre" value={g} onFilter={filter}/>)}</div></div>}<GameDlcDisclosure dlcs={game.dlcs}/>{game.synopsis&&<div className="detail-section"><span className="detail-label">게임 소개</span><div className="detail-text">{game.synopsis}</div></div>}{game.notes&&<div className="detail-section"><span className="detail-label">메모</span><div className="detail-text">{game.notes}</div></div>}</div><div className="drawer__foot"><div className="drawer__foot-actions"><button type="button" className="btn btn--ghost" onClick={onClose}>닫기</button><button type="button" className="btn btn--primary" onClick={()=>onEdit(game)}><Pencil size={14}/> 편집</button></div></div></div></div>;}
@@ -3930,6 +3937,68 @@ const APP_CSS = `
         .game-dlc-inline{display:block;width:100%;min-width:0;max-width:100%}.game-dlc-disclosure{min-width:0;max-width:100%;font-size:12px;line-height:1.6}.game-dlc-disclosure>summary{cursor:pointer;color:var(--accent);font-weight:600;width:fit-content;border:1px solid var(--line);border-radius:999px;padding:4px 10px;background:color-mix(in srgb,var(--accent) 8%,transparent)}.game-dlc-list{list-style:none;padding:0;margin:7px 0 0;display:flex;flex-direction:column;gap:6px;min-width:0}.game-dlc-list li{display:flex;align-items:flex-start;gap:7px;padding:7px 8px;border-radius:8px;background:color-mix(in srgb,var(--accent) 5%,transparent);min-width:0;max-width:100%}.game-dlc-name{flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere;word-break:normal;color:var(--ink-soft);font-size:12px;line-height:1.55}.game-dlc-state{flex:none;white-space:nowrap;border-radius:999px;padding:1px 6px;background:var(--paper-2);color:var(--ink-soft);font-size:10.5px}.game-dlc-state.is-owned{background:color-mix(in srgb,var(--accent) 12%,var(--paper));color:var(--accent)}
         .game-poster-only{display:block;width:100%;padding:0;border:0;line-height:0;background:var(--paper)}.game-poster-only .game-img{width:100%;aspect-ratio:2/3}.game-detail-head{display:flex;align-items:flex-start;gap:16px;min-width:0}.game-detail-cover{width:150px;max-width:40%;flex:none}.game-detail-title{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px}.game-detail-title h3{margin:0;line-height:1.4;color:var(--ink);overflow-wrap:anywhere}.game-detail-title .heart-btn,.game-detail-title .heart-btn.is-on{opacity:1;color:var(--accent)}.game-grid{grid-template-columns:repeat(auto-fill,minmax(min(400px,100%),1fr));align-items:start}.game-gallery{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));align-items:start}.gcard[role="button"]{cursor:pointer}.gcard__meta.gcard__clamp{white-space:normal;overflow-wrap:anywhere}
         @media(hover:none){.gcard .card__actions .heart-btn,.card .card__actions .heart-btn{opacity:1}}@media(max-width:520px){.gcard__cover{flex-basis:130px;width:130px}.game-gallery{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}}
+
+        /* ===== 게임 탭 카드 리디자인 ===== */
+        .game-grid, .game-gallery { --gp-w: 200px; }
+        .game-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(var(--gp-w) * 2.5)), 1fr)); gap: 20px; align-items: stretch; }
+        .gcard { --gp-w: 200px; height: calc(var(--gp-w) * 1.5); min-height: 0; align-items: stretch; overflow: visible; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(135deg, var(--paper) 62%, color-mix(in srgb, var(--paper-2) 80%, var(--paper))); box-shadow: 0 1px 0 rgba(255,255,255,0.35) inset, 0 2px 8px rgba(0,0,0,0.16); transition: border-color .15s, transform .15s, box-shadow .15s; }
+        .gcard:hover { border-color: color-mix(in srgb, var(--gold) 70%, var(--line)); transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,0,0,0.28); }
+        .gcard__cover, .gcard > .game-img { position: relative; flex: 0 0 var(--gp-w); width: var(--gp-w); max-width: none; height: 100%; align-self: stretch; border-radius: 13px 0 0 13px; overflow: hidden; padding: 0; border: 0; border-right: 1px solid color-mix(in srgb, var(--gold) 45%, var(--line)); background: color-mix(in srgb, var(--ink) 10%, var(--paper)); cursor: pointer; }
+        .gcard__cover .game-img { width: 100%; height: 100%; aspect-ratio: auto; }
+        .gcard > .game-img { aspect-ratio: auto; }
+        .gcard__cover .game-img img, .gcard > .game-img img { object-fit: contain; }
+        .gcard__wish { position: absolute; top: 8px; left: 8px; z-index: 3; font-size: 10.5px; font-weight: 800; padding: 3px 9px; border-radius: 999px; background: var(--accent); color: var(--paper); box-shadow: 0 1px 4px rgba(0,0,0,0.4); }
+        .gcard--unowned { background: color-mix(in srgb, var(--accent) 7%, var(--paper)); border-style: dashed; border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+        .gcard--unowned .game-img img { filter: saturate(0.5) opacity(0.85); }
+        .gcard__body { flex: 1; min-width: 0; padding: 16px 18px 13px 20px; display: flex; flex-direction: column; gap: 10px; }
+        .gcard__head { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+        .gcard__top { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
+        .gcard__title-button { flex: 1; min-width: 0; font-family: Georgia, "Apple SD Gothic Neo", serif; font-size: 18px; font-weight: 700; line-height: 1.3; letter-spacing: -0.01em; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+        .gcard__title-button:hover { color: var(--accent); }
+        .gcard__orig { font-size: 12.5px; color: var(--ink-soft); line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .gcard__line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; margin-top: 2px; }
+        .gcard__series { display: inline-flex; align-items: center; gap: 4px; color: var(--gold); font-weight: 700; }
+        .gcard__series .glink { color: inherit; }
+        .gcard__genres { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .gcard__badges { display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; max-height: 56px; overflow: hidden; }
+        .gcard__badges .gbadge { padding: 5px 10px; font-size: 11px; white-space: nowrap; max-width: 100%; background: transparent; border: 1px solid var(--line); color: var(--ink-soft); }
+        .gcard__badges .gbadge--plat { background: var(--accent); border-color: var(--accent); color: var(--paper); }
+        .gcard__badges .gbadge--good { background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); color: var(--accent); }
+        .gcard__badges .gbadge--warn { background: color-mix(in srgb, var(--gold) 20%, transparent); border-color: color-mix(in srgb, var(--gold) 55%, transparent); color: var(--ink); }
+        .gcard__badges .gbadge--link:hover { text-decoration: none; border-color: var(--accent); color: var(--accent); filter: none; }
+        .gcard__badges .gbadge--plat.gbadge--link:hover { background: color-mix(in srgb, var(--accent) 82%, #000); color: var(--paper); }
+        .gcard__synopsis { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink-soft); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; flex: none; }
+        .gcard__synopsis--short { -webkit-line-clamp: 2; }
+        .game-dlc-inline { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; gap: 4px; width: 100%; }
+        .gcard__dlc-head { display: flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 800; letter-spacing: .06em; color: var(--ink-soft); }
+        .gcard__dlc-head em { font-style: normal; font-weight: 600; letter-spacing: 0; color: var(--accent); }
+        .game-dlc-inline .game-dlc-list { flex: 1; min-height: 0; margin: 0; gap: 3px; overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; scrollbar-width: thin; }
+        .game-dlc-inline .game-dlc-list li { padding: 4px 8px; background: color-mix(in srgb, var(--ink) 5%, transparent); }
+        .game-dlc-inline .game-dlc-name { font-size: 11.5px; line-height: 1.4; }
+        .gcard__foot { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 36px; flex: none; }
+        .gcard__foot .more-info, .gcard__foot .game-card-popovers { position: static; margin-left: auto; }
+        .gcard__foot .game-popover-toggle.more-info__toggle { height: 26px; font-size: 11px; padding: 0 10px; }
+        .gcard .game-card-popovers > .game-popover-body { position: absolute; top: calc(100% + 6px); left: 0; right: 0; }
+        .gcard .card__actions .heart-btn { opacity: .55; }
+        .gcard .card__actions .heart-btn.is-on, .gcard:hover .card__actions .heart-btn, .gcard:focus-within .card__actions .heart-btn { opacity: 1; }
+        /* 시리즈 묶음 카드 */
+        .gcard:not(:has(.gcard__head)) .gcard__body { justify-content: center; gap: 6px; }
+        .gcard:not(:has(.gcard__head)) .gcard__title { font-family: Georgia, "Apple SD Gothic Neo", serif; font-size: 16.5px; }
+        .gcard:not(:has(.gcard__head)) .gcard__meta.gcard__clamp { -webkit-line-clamp: 4; }
+        .gseries-block { border-radius: 16px; padding: 12px; background: color-mix(in srgb, var(--gold) 5%, transparent); }
+        /* 갤러리 */
+        .game-gallery { grid-template-columns: repeat(auto-fill, minmax(var(--gp-w), 1fr)); gap: 16px; }
+        .gtile { border-radius: 12px; border: 1px solid var(--line); box-shadow: 0 2px 8px rgba(0,0,0,0.2); transition: transform .15s, box-shadow .15s; }
+        .gtile:hover { transform: translateY(-2px); box-shadow: 0 8px 18px rgba(0,0,0,0.3); }
+        @media (max-width: 520px) {
+          .game-grid, .game-gallery { --gp-w: 124px; }
+          .game-grid { grid-template-columns: 1fr; gap: 12px; }
+          .gcard { --gp-w: 124px; }
+          .gcard__synopsis { display: none; }
+          .gcard__body { padding: 10px 10px 9px 12px; gap: 6px; }
+          .gcard__title-button { font-size: 15px; }
+          .game-gallery { grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 10px; }
+        }
 `;
 
 function SaveStatus({ saving }) {
