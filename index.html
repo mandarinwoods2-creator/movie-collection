@@ -2887,7 +2887,7 @@ function GameLink({ type, value, onFilter }) {
 
 function representativeGameLanguage(game){if(game.korean==='official')return {t:'공식 한글화',c:'gbadge--good',f:{type:'korean',value:'official',label:'공식 한글화'}};if(game.korean==='patch')return {t:'유저 한글패치',c:'gbadge--warn',f:{type:'korean',value:'patch',label:'유저 한글패치'}};for(const [rx,label] of [[/영어|English/i,'영어'],[/일본어|일어|Japanese/i,'일본어'],[/중국어|Chinese/i,'중국어']]){const v=(game.otherLangs||[]).find(l=>rx.test(l));if(v)return {t:label,c:'',f:{type:label==='중국어'?'chinese':'lang',value:label==='중국어'?'중국어':v,label}};}return null;}
 function compareCollectionItems(a,b,sort){const title=()=>String(a.titleKr||'').localeCompare(String(b.titleKr||''),'ko');if(sort==='title')return title();if(sort.startsWith('year')){const x=String(a.releaseDate||a.year||''),y=String(b.releaseDate||b.year||'');if(!x)return y?1:title();if(!y)return -1;return (sort==='year-desc'?y.localeCompare(x):x.localeCompare(y))||title();}if(sort.startsWith('rating')){const x=Number(a.rating)>0?Number(a.rating):null,y=Number(b.rating)>0?Number(b.rating):null;if(x===null)return y===null?title():1;if(y===null)return -1;return (sort==='rating-desc'?y-x:x-y)||title();}return (b.createdAt||0)-(a.createdAt||0)||title();}
-function GameDlcList({dlcs=[]}){return <ul className="game-dlc-list">{dlcs.map((d,i)=><li key={d.id||i}><span className="game-dlc-name">{d.name}</span><span className={`game-dlc-state${d.owned?' is-owned':''}`}>{d.owned?'구매':'미구매'}</span></li>)}</ul>;}
+function GameDlcList({dlcs=[]}){return <ul className="game-dlc-list">{dlcs.map((d,i)=><li key={d.id||i}><span className="game-dlc-name" title={d.name}>{d.name}</span><span className={`game-dlc-state${d.owned?' is-owned':''}`}>{d.owned?'구매':'미구매'}</span></li>)}</ul>;}
 function GameDlcDisclosure({dlcs=[]}){if(!dlcs.length)return null;return <details className="game-dlc-disclosure"><summary>DLC {dlcs.filter(d=>d.owned).length}/{dlcs.length} 구매</summary><GameDlcList dlcs={dlcs}/></details>;}
 function GameCard({game,onEdit,onFilter,onOpenDetail}){
  const [introOpen,setIntroOpen]=useState(false);const anchor=React.useRef(null);const dlcs=game.dlcs||[];
@@ -2905,7 +2905,6 @@ function GameCard({game,onEdit,onFilter,onOpenDetail}){
    {(seriesTxt||!!(game.genres||[]).length)&&<div className="gcard__line">{seriesTxt&&<span className="gcard__series">{seriesTxt}</span>}{!!(game.genres||[]).length&&<span className="gcard__genres">{game.genres.map((g,i)=><span key={g}>{i>0&&' · '}<GameLink type="genre" value={g} onFilter={onFilter}/></span>)}</span>}</div>}
   </div>
   <div className="gcard__badges">{gameBadges(game).map((b,i)=><button key={i} type="button" className={`gbadge gbadge--link ${b.c}`} onClick={()=>onFilter(b.f.type,b.f.value,b.f.label)}>{b.t}</button>)}</div>
-  {game.synopsis&&<p className={`gcard__synopsis${dlcs.length?' gcard__synopsis--short':''}`}>{game.synopsis}</p>}
   {dlcs.length>0&&<section className="game-dlc-inline"><div className="gcard__dlc-head"><span>DLC</span><em>{dlcs.filter(d=>d.owned).length}/{dlcs.length} 구매</em></div><GameDlcList dlcs={dlcs}/></section>}
   <div className="gcard__foot"><StarRating value={game.rating} readOnly size={13}/>
   {game.synopsis&&<div className="more-info game-card-popovers" ref={anchor}><button type="button" className={`more-info__toggle game-popover-toggle${introOpen?' game-popover-toggle--open':''}`} aria-expanded={introOpen} aria-controls={`game-intro-${game.id}`} onClick={()=>setIntroOpen(v=>!v)}>게임 소개 <span aria-hidden="true">{introOpen?'⌃':'⌄'}</span></button>{introOpen&&<div id={`game-intro-${game.id}`} className="more-info__body game-popover-body" role="region" aria-label="게임 소개"><div className="more-info__block"><b>게임 소개</b><p>{game.synopsis}</p></div></div>}</div>}
@@ -3940,7 +3939,7 @@ const APP_CSS = `
 
         /* ===== 게임 탭 카드 리디자인 ===== */
         .game-grid, .game-gallery { --gp-w: 200px; }
-        .game-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(var(--gp-w) * 2.5)), 1fr)); gap: 20px; align-items: stretch; }
+        .game-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(var(--gp-w) * 2.7)), 1fr)); gap: 20px; align-items: stretch; }
         .gcard { --gp-w: 200px; height: calc(var(--gp-w) * 1.5); min-height: 0; align-items: stretch; overflow: visible; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(135deg, var(--paper) 62%, color-mix(in srgb, var(--paper-2) 80%, var(--paper))); box-shadow: 0 1px 0 rgba(255,255,255,0.35) inset, 0 2px 8px rgba(0,0,0,0.16); transition: border-color .15s, transform .15s, box-shadow .15s; }
         .gcard:hover { border-color: color-mix(in srgb, var(--gold) 70%, var(--line)); transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,0,0,0.28); }
         .gcard__cover, .gcard > .game-img { position: relative; flex: 0 0 var(--gp-w); width: var(--gp-w); max-width: none; height: 100%; align-self: stretch; border-radius: 13px 0 0 13px; overflow: hidden; padding: 0; border: 0; border-right: 1px solid color-mix(in srgb, var(--gold) 45%, var(--line)); background: color-mix(in srgb, var(--ink) 10%, var(--paper)); cursor: pointer; }
@@ -3950,7 +3949,7 @@ const APP_CSS = `
         .gcard__wish { position: absolute; top: 8px; left: 8px; z-index: 3; font-size: 10.5px; font-weight: 800; padding: 3px 9px; border-radius: 999px; background: var(--accent); color: var(--paper); box-shadow: 0 1px 4px rgba(0,0,0,0.4); }
         .gcard--unowned { background: color-mix(in srgb, var(--accent) 7%, var(--paper)); border-style: dashed; border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
         .gcard--unowned .game-img img { filter: saturate(0.5) opacity(0.85); }
-        .gcard__body { flex: 1; min-width: 0; padding: 16px 18px 13px 20px; display: flex; flex-direction: column; gap: 10px; }
+        .gcard__body { flex: 1; min-width: 0; padding: 14px 16px 10px 18px; display: flex; flex-direction: column; gap: 8px; }
         .gcard__head { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
         .gcard__top { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
         .gcard__title-button { flex: 1; min-width: 0; font-family: Georgia, "Apple SD Gothic Neo", serif; font-size: 18px; font-weight: 700; line-height: 1.3; letter-spacing: -0.01em; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
@@ -3960,22 +3959,26 @@ const APP_CSS = `
         .gcard__series { display: inline-flex; align-items: center; gap: 4px; color: var(--gold); font-weight: 700; }
         .gcard__series .glink { color: inherit; }
         .gcard__genres { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .gcard__badges { display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; max-height: 56px; overflow: hidden; }
+        .gcard__badges { display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; max-height: 52px; overflow: hidden; flex: none; }
         .gcard__badges .gbadge { padding: 5px 10px; font-size: 11px; white-space: nowrap; max-width: 100%; background: transparent; border: 1px solid var(--line); color: var(--ink-soft); }
         .gcard__badges .gbadge--plat { background: var(--accent); border-color: var(--accent); color: var(--paper); }
         .gcard__badges .gbadge--good { background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); color: var(--accent); }
         .gcard__badges .gbadge--warn { background: color-mix(in srgb, var(--gold) 20%, transparent); border-color: color-mix(in srgb, var(--gold) 55%, transparent); color: var(--ink); }
         .gcard__badges .gbadge--link:hover { text-decoration: none; border-color: var(--accent); color: var(--accent); filter: none; }
         .gcard__badges .gbadge--plat.gbadge--link:hover { background: color-mix(in srgb, var(--accent) 82%, #000); color: var(--paper); }
-        .gcard__synopsis { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink-soft); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; flex: none; }
-        .gcard__synopsis--short { -webkit-line-clamp: 2; }
         .game-dlc-inline { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; gap: 4px; width: 100%; }
         .gcard__dlc-head { display: flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 800; letter-spacing: .06em; color: var(--ink-soft); }
         .gcard__dlc-head em { font-style: normal; font-weight: 600; letter-spacing: 0; color: var(--accent); }
-        .game-dlc-inline .game-dlc-list { flex: 1; min-height: 0; margin: 0; gap: 3px; overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; scrollbar-width: thin; }
+        .game-dlc-inline .game-dlc-list { flex: 1; min-height: 0; margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: min-content; gap: 3px 6px; align-content: start; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+        .game-dlc-inline .game-dlc-list li { align-items: center; gap: 6px; padding: 3px 7px; }
+        .game-dlc-inline .game-dlc-name { font-size: 11px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .game-dlc-inline .game-dlc-state { font-size: 0; padding: 0; width: 14px; height: 14px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: transparent; border: 1.5px solid var(--line-dark, var(--ink-soft)); }
+        .game-dlc-inline .game-dlc-state::before { content: ''; font-size: 10px; line-height: 1; font-weight: 800; }
+        .game-dlc-inline .game-dlc-state.is-owned { background: var(--accent); border-color: var(--accent); }
+        .game-dlc-inline .game-dlc-state.is-owned::before { content: '✓'; color: var(--paper); }
         .game-dlc-inline .game-dlc-list li { padding: 4px 8px; background: color-mix(in srgb, var(--ink) 5%, transparent); }
         .game-dlc-inline .game-dlc-name { font-size: 11.5px; line-height: 1.4; }
-        .gcard__foot { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 36px; flex: none; }
+        .gcard__foot { margin-top: auto; padding-top: 7px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 30px; flex: none; }
         .gcard__foot .more-info, .gcard__foot .game-card-popovers { position: static; margin-left: auto; }
         .gcard__foot .game-popover-toggle.more-info__toggle { height: 26px; font-size: 11px; padding: 0 10px; }
         .gcard .game-card-popovers > .game-popover-body { position: absolute; top: calc(100% + 6px); left: 0; right: 0; }
@@ -3994,8 +3997,8 @@ const APP_CSS = `
           .game-grid, .game-gallery { --gp-w: 124px; }
           .game-grid { grid-template-columns: 1fr; gap: 12px; }
           .gcard { --gp-w: 124px; }
-          .gcard__synopsis { display: none; }
           .gcard__body { padding: 10px 10px 9px 12px; gap: 6px; }
+          .game-dlc-inline .game-dlc-list { grid-template-columns: 1fr; }
           .gcard__title-button { font-size: 15px; }
           .game-gallery { grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 10px; }
         }
