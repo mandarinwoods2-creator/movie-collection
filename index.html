@@ -1104,15 +1104,31 @@ const IMGBB_API_KEY = 'c5dd68399246ec0708ba5b531e9b5078';
 async function uploadToImgbb(source) {
   const formData = new FormData();
   formData.append('image', source);
-  const res = await fetch(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, {
-    method: 'POST',
-    body: formData,
-  });
-  const data = await res.json();
-  if (!data || !data.success) {
-    throw new Error(data?.error?.message || '이미지 업로드에 실패했어요');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch (_) {
+      throw new Error(`imgbb 응답 오류: HTTP ${res.status} / ${text.slice(0, 300)}`);
+    }
+    const hosted = data && data.data && (data.data.url || data.data.display_url);
+    if (!res.ok || !data.success || !hosted) {
+      throw new Error(`imgbb 업로드 실패: HTTP ${res.status} / ${JSON.stringify(data.error || data).slice(0, 500)}`);
+    }
+    return hosted;
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('imgbb 업로드 요청이 30초 안에 끝나지 않았습니다.');
+    if (e instanceof TypeError) throw new Error(`imgbb 요청을 완료하지 못했습니다. 네트워크 또는 브라우저 요청 제한일 수 있어요. (${e.message})`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  return data.data.url || data.data.display_url;
 }
 
 function Poster({ url, size = 'card' }) {
@@ -3092,15 +3108,23 @@ function GameForm({ initial, games, onSave, onCancel, onDelete, saving }) {
 
   async function handleApplyManualUrl() {
     const url = manualUrlDraft.trim();
-    if (!url) return;
-    setPosterBusy(true);
+    if (!url || posterBusy) return;
     setPosterError('');
+    let parsed;
+    try { parsed = new URL(url); } catch (_) {
+      setPosterError('이미지 URL 형식이 올바르지 않습니다.'); return;
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      setPosterError('http 또는 https 이미지 주소를 넣어 주세요.'); return;
+    }
+    setPosterBusy(true);
     try {
-      const hostedUrl = await uploadToImgbb(url);
-      setPosterUrl(hostedUrl);
+      const hosted = await uploadToImgbb(url);
+      setPosterUrl(hosted);
       setManualUrlDraft('');
     } catch (e) {
-      setPosterError('이미지를 저장하지 못했어요. URL이 맞는지 확인하거나 다른 이미지로 시도해보세요.');
+      console.error('게임 이미지 업로드 오류:', e);
+      setPosterError((e.message || String(e)) + ' 기존 이미지와 입력 URL은 유지했습니다. 원본 URL로 대체하지 않았습니다.');
     } finally {
       setPosterBusy(false);
     }
@@ -3108,14 +3132,15 @@ function GameForm({ initial, games, onSave, onCancel, onDelete, saving }) {
 
   async function handleFileUpload(e) {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || posterBusy) return;
     setPosterBusy(true);
     setPosterError('');
     try {
       const hostedUrl = await uploadToImgbb(file);
       setPosterUrl(hostedUrl);
     } catch (err) {
-      setPosterError('이미지를 저장하지 못했어요. 다른 파일로 시도해보세요.');
+      console.error('게임 이미지 파일 업로드 오류:', err);
+      setPosterError((err.message || String(err)) + ' 기존 이미지는 유지했습니다.');
     } finally {
       setPosterBusy(false);
       e.target.value = '';
@@ -3174,7 +3199,7 @@ function GameForm({ initial, games, onSave, onCancel, onDelete, saving }) {
 
         <div className="drawer__body">
           <div className="field">
-            <span>게임 이미지</span>
+            <span>게임 이미지 (세로형 600×900)</span>
             <div className="game-img-preview">
               <GameImage url={posterUrl} />
             </div>
@@ -3194,7 +3219,7 @@ function GameForm({ initial, games, onSave, onCancel, onDelete, saving }) {
               {posterBusy ? '처리 중...' : '이미지 파일 선택'}
               <input type="file" accept="image/*" onChange={handleFileUpload} disabled={posterBusy} />
             </label>
-            <p className="hint-text-small">Steam 상점 페이지의 대표 이미지(가로형)를 우클릭해서 이미지 주소를 복사해 붙여넣으면 돼요. 두 방법 모두 imgbb에 저장해서 영구 주소로 바꿔둬요.</p>
+            <p className="hint-text-small">직접 입력한 이미지 주소를 변경하지 않고 imgbb에 업로드해요. 실패하면 오류를 표시하며 원본 URL로 대체하지 않아요.</p>
             {posterError && <p className="field-error">{posterError}</p>}
           </div>
 
@@ -3401,7 +3426,7 @@ function GameForm({ initial, games, onSave, onCancel, onDelete, saving }) {
           )}
           <div className="drawer__foot-actions">
             <button type="button" className="btn btn--ghost" onClick={onCancel} disabled={saving}>취소</button>
-            <button type="button" className="btn btn--primary" onClick={handleSave} disabled={!titleKr.trim() || saving}>{saving ? <><Loader2 size={14} className="spin" /> 저장 중...</> : '저장'}</button>
+            <button type="button" className="btn btn--primary" onClick={handleSave} disabled={!titleKr.trim() || saving || posterBusy}>{saving ? <><Loader2 size={14} className="spin" /> 저장 중...</> : '저장'}</button>
           </div>
         </div>
       </div>
@@ -3932,21 +3957,22 @@ const APP_CSS = `
         .detail-loc { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink); }
         .type-tabs { margin: 2px 0 6px; }
         .type-tabs button { font-weight: 700; padding: 9px 4px; }
-        .game-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
-        .gcard { background: var(--paper); border-radius: 12px; overflow: hidden; cursor: pointer; display: flex; flex-direction: column; position: relative; border: 1px solid transparent; transition: border-color 0.15s, transform 0.15s; }
+        .game-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(400px, 100%), 1fr)); gap: 16px; }
+        .gcard { background: var(--paper); border-radius: 12px; overflow: hidden; cursor: pointer; display: flex; flex-direction: row; position: relative; border: 1px solid transparent; transition: border-color 0.15s, transform 0.15s; }
         .gcard:hover { border-color: var(--accent); transform: translateY(-1px); }
-        .game-img { position: relative; width: 100%; aspect-ratio: 460 / 215; background: color-mix(in srgb, var(--ink) 9%, var(--paper)); overflow: hidden; }
+        .game-img { position: relative; width: 100%; aspect-ratio: 2 / 3; background: color-mix(in srgb, var(--ink) 9%, var(--paper)); overflow: hidden; }
+        .gcard > .game-img { width: 176px; flex: none; }
         .game-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
         .game-img--empty { display: flex; align-items: center; justify-content: center; color: var(--ink-soft); }
         .game-img .heart-btn { position: absolute; right: 8px; bottom: 8px; z-index: 2; color: #fff; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6)); }
         .game-img .heart-btn.is-on { color: var(--accent-soft); }
         .gcard:hover .heart-btn, .gtile:hover .heart-btn { opacity: 1; }
         .gcard__wish { position: absolute; top: 8px; left: 8px; z-index: 2; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; color: #fff; background: rgba(0,0,0,0.55); }
-        .gcard__body { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+        .gcard__body { flex: 1; padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 7px; min-width: 0; }
         .gcard__title { font-size: 15px; font-weight: 700; color: var(--ink); line-height: 1.35; }
         .gcard__title small { font-weight: 400; font-size: 12px; color: var(--ink-soft); margin-left: 6px; }
         .gcard__meta { font-size: 12px; color: var(--ink-soft); line-height: 1.5; }
-        .gcard__clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .gcard__clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
         .gcard__badges { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
         .gbadge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 600; line-height: 1; padding: 4px 8px; border-radius: 999px; background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink-soft); white-space: nowrap; border: none; font-family: inherit; }
         .gbadge--link { cursor: pointer; }
@@ -3957,14 +3983,14 @@ const APP_CSS = `
         .gbadge--bad { background: rgba(190, 70, 70, 0.14); color: #a8433f; }
         .glink { background: none; border: none; padding: 0; margin: 0; color: inherit; font: inherit; cursor: pointer; }
         .glink:hover { color: var(--accent); text-decoration: underline; }
-        .gcard__synopsis { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-        .game-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+        .gcard__synopsis { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+        .game-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(176px, 1fr)); gap: 14px; }
         .gtile { position: relative; border-radius: 12px; overflow: hidden; cursor: pointer; background: var(--paper); text-align: left; }
         .gtile__overlay { position: absolute; left: 0; right: 0; bottom: 0; padding: 28px 12px 10px; background: linear-gradient(transparent, rgba(0,0,0,0.78)); color: #fff; display: flex; flex-direction: column; gap: 5px; pointer-events: none; }
         .gtile__title { font-size: 14px; font-weight: 700; line-height: 1.3; }
         .gtile__plats { display: flex; gap: 4px; flex-wrap: wrap; }
         .gtile__plats span { font-size: 10.5px; padding: 2px 7px; border-radius: 999px; background: rgba(255,255,255,0.24); }
-        .game-img-preview { width: 100%; max-width: 400px; border-radius: 10px; overflow: hidden; }
+        .game-img-preview { width: 180px; border-radius: 10px; overflow: hidden; }
         .dlc-row { align-items: center; }
         .dlc-row input { flex: 1; min-width: 0; }
         .dlc-row .segmented { flex: none; }
