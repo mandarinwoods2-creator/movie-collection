@@ -597,6 +597,7 @@ function makeIcon(children, viewBox) {
   };
 }
 const Search = makeIcon(<><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></>);
+const ShieldIcon = makeIcon(<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />);
 const Plus = makeIcon(<><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></>);
 const Upload = makeIcon(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></>);
 const X = makeIcon(<><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>);
@@ -1116,7 +1117,7 @@ const IMGBB_API_KEY = 'c5dd68399246ec0708ba5b531e9b5078';
 // source가 문자열(URL)이면 imgbb 서버가 직접 그 주소에서 가져가 호스팅하고,
 // File/Blob이면 그대로 업로드한다. 반환되는 건 imgbb의 짧고 영구적인 이미지 주소라서
 // JSONBin에는 이 짧은 URL만 저장되고, 원본 출처 사이트가 나중에 사라져도 안전하다.
-async function uploadToImgbb(source) {
+async function uploadToImgbbRaw(source) {
   const formData = new FormData();
   formData.append('image', source);
   const controller = new AbortController();
@@ -1144,6 +1145,148 @@ async function uploadToImgbb(source) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+
+// ---------------------------------------------------------------
+// 포스터 이미지 저장소: Supabase Storage(공개 버킷 'posters')
+// - 새 이미지는 브라우저에서 가로세로 900px 이내 JPEG로 줄여 올린다 (목록 로딩 속도 유지).
+// - Supabase 업로드가 실패하면 기존처럼 imgbb로 대신 저장해 등록이 막히지 않게 한다.
+// ---------------------------------------------------------------
+const POSTER_BUCKET = 'posters';
+const POSTER_PUBLIC_PREFIX = `${SUPABASE_URL}/storage/v1/object/public/${POSTER_BUCKET}/`;
+const isOwnPosterUrl = u => typeof u === 'string' && u.startsWith(POSTER_PUBLIC_PREFIX);
+const LAST_BACKUP_KEY = 'mc-last-external-backup';
+function getLastExternalBackup() { try { return Number(localStorage.getItem(LAST_BACKUP_KEY)) || 0; } catch (_) { return 0; } }
+function setLastExternalBackup(ts) { try { localStorage.setItem(LAST_BACKUP_KEY, String(ts)); } catch (_) {} }
+
+async function fetchImageBlob(url) {
+  const res = await fetch(url, { mode: 'cors', cache: 'no-store' });
+  if (!res.ok) throw new Error(`이미지 요청 실패 (${res.status})`);
+  const blob = await res.blob();
+  if (!blob.type.startsWith('image/')) throw new Error('이미지 파일이 아닙니다');
+  return blob;
+}
+async function decodeImage(blob) {
+  if (typeof createImageBitmap === 'function') {
+    try { const b = await createImageBitmap(blob); return { src: b, w: b.width, h: b.height }; } catch (_) {}
+  }
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((resolve, reject) => { const i = new Image(); i.onload = () => resolve(i); i.onerror = () => reject(new Error('이미지를 읽지 못했습니다')); i.src = url; });
+    return { src: img, w: img.naturalWidth, h: img.naturalHeight };
+  } finally { URL.revokeObjectURL(url); }
+}
+async function shrinkImageBlob(blob, maxSide = 900, quality = 0.85) {
+  const dec = await decodeImage(blob);
+  const scale = Math.min(1, maxSide / Math.max(dec.w, dec.h));
+  if (scale === 1 && blob.type === 'image/jpeg' && blob.size <= 250 * 1024) return { blob, w: dec.w, h: dec.h };
+  const w = Math.max(1, Math.round(dec.w * scale)), h = Math.max(1, Math.round(dec.h * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx2d = canvas.getContext('2d');
+  ctx2d.fillStyle = '#fff'; ctx2d.fillRect(0, 0, w, h);
+  ctx2d.drawImage(dec.src, 0, 0, w, h);
+  const out = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+  if (!out) throw new Error('이미지를 변환하지 못했습니다');
+  return { blob: out, w: dec.w, h: dec.h };
+}
+async function uploadPosterBlob(blob) {
+  const name = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}.jpg`;
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${POSTER_BUCKET}/${name}`, {
+    method: 'POST',
+    headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}`, 'Content-Type': 'image/jpeg', 'cache-control': 'max-age=31536000', 'x-upsert': 'false' },
+    body: blob,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(`Supabase 이미지 저장 실패 (${res.status})${body && body.message ? `: ${body.message}` : ''}`);
+  }
+  return POSTER_PUBLIC_PREFIX + name;
+}
+async function uploadToImgbb(source) {
+  let blob = null;
+  let hosted = null;
+  try { blob = typeof source === 'string' ? await fetchImageBlob(source) : source; } catch (_) {}
+  if (!blob && typeof source === 'string') {
+    hosted = await uploadToImgbbRaw(source);
+    try { blob = await fetchImageBlob(hosted); } catch (_) { return hosted; }
+  }
+  try {
+    const { blob: small } = await shrinkImageBlob(blob);
+    return await uploadPosterBlob(small);
+  } catch (e) {
+    console.warn('Supabase 이미지 저장 실패, imgbb로 대신 저장합니다:', e);
+    return hosted || await uploadToImgbbRaw(typeof source === 'string' ? source : blob);
+  }
+}
+async function testPosterBucket() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 2; canvas.height = 3;
+  const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.8));
+  const url = await uploadPosterBlob(blob);
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`올린 이미지를 다시 읽지 못했습니다 (${res.status}). 버킷이 공개(public)인지 확인하세요.`);
+  return url;
+}
+
+// ---- 외부 백업용 ZIP (압축 없이 묶기만 하는 간단한 ZIP 작성기) ----
+const _crcTable = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(bytes) { let c = 0xFFFFFFFF; for (let i = 0; i < bytes.length; i++) c = _crcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+function makeZip(files) {
+  const enc = new TextEncoder();
+  const now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  const parts = [], central = [];
+  let offset = 0;
+  for (const f of files) {
+    const nameBytes = enc.encode(f.name);
+    const data = f.data;
+    const crc = crc32(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 0, true);
+    lh.setUint16(10, dosTime, true); lh.setUint16(12, dosDate, true); lh.setUint32(14, crc, true);
+    lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true); lh.setUint16(26, nameBytes.length, true); lh.setUint16(28, 0, true);
+    parts.push(new Uint8Array(lh.buffer), nameBytes, data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true); ch.setUint16(10, 0, true);
+    ch.setUint16(12, dosTime, true); ch.setUint16(14, dosDate, true); ch.setUint32(16, crc, true);
+    ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true); ch.setUint16(28, nameBytes.length, true);
+    ch.setUint32(42, offset, true);
+    central.push(new Uint8Array(ch.buffer), nameBytes);
+    offset += 30 + nameBytes.length + data.length;
+  }
+  const centralSize = central.reduce((n, p) => n + p.length, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+  end.setUint32(12, centralSize, true); end.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
+}
+async function buildBackupZip({ movies, customFormats, settings, onProgress }) {
+  const enc = new TextEncoder();
+  const urls = [...new Set(movies.map(m => m.posterUrl).filter(Boolean))];
+  const files = [], map = {}, missing = [];
+  let done = 0;
+  const queue = urls.map((u, i) => ({ u, i }));
+  async function worker() {
+    while (queue.length) {
+      const { u, i } = queue.shift();
+      try {
+        const blob = await fetchImageBlob(u);
+        const ext = blob.type === 'image/png' ? 'png' : blob.type === 'image/webp' ? 'webp' : 'jpg';
+        const name = `posters/${String(i + 1).padStart(5, '0')}.${ext}`;
+        files.push({ name, data: new Uint8Array(await blob.arrayBuffer()) });
+        map[u] = name;
+      } catch (e) { missing.push(u); }
+      done++; onProgress && onProgress(done, urls.length);
+    }
+  }
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  const payload = { app: 'collection', version: 1, exportedAt: new Date().toISOString(), movies, customFormats, settings, posterFiles: map };
+  files.unshift({ name: 'data.json', data: enc.encode(JSON.stringify(payload, null, 1)) });
+  if (missing.length) files.push({ name: 'missing-posters.txt', data: enc.encode('내려받지 못한 이미지 주소:\n' + missing.join('\n')) });
+  return { blob: makeZip(files), imageCount: Object.keys(map).length, missingCount: missing.length };
 }
 
 function Poster({ url, size = 'card' }) {
@@ -1973,6 +2116,118 @@ function BulkImportModal({ onCancel, onConfirm, saving, locationSeed }) {
             </button>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+
+const SETUP_SQL = `insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('posters', 'posters', true, 5242880, array['image/jpeg','image/png','image/webp'])
+on conflict (id) do nothing;
+
+create policy "posters public read" on storage.objects for select to anon using (bucket_id = 'posters');
+create policy "posters anon upload" on storage.objects for insert to anon with check (bucket_id = 'posters');`;
+const BACKUP_STALE_DAYS = 30;
+function backupAgeDays() { const t = getLastExternalBackup(); return t ? Math.floor((Date.now() - t) / 86400000) : null; }
+
+function DataSafetyModal({ movies, customFormats, settings, busyOuter, loadError, onClose, onMigrate }) {
+  const [lastBackup, setLastBackup] = useState(getLastExternalBackup());
+  const [zipBusy, setZipBusy] = useState(false);
+  const [zipMsg, setZipMsg] = useState('');
+  const [migBusy, setMigBusy] = useState(false);
+  const [migMsg, setMigMsg] = useState('');
+  const [migReport, setMigReport] = useState(null);
+  const [testMsg, setTestMsg] = useState('');
+  const withPoster = movies.filter(m => m.posterUrl);
+  const own = withPoster.filter(m => isOwnPosterUrl(m.posterUrl)).length;
+  const other = withPoster.length - own;
+  const days = lastBackup ? Math.floor((Date.now() - lastBackup) / 86400000) : null;
+  const busy = zipBusy || migBusy || busyOuter;
+
+  async function runZip(list) {
+    setZipBusy(true); setZipMsg('데이터와 이미지를 모으는 중...');
+    try {
+      const { blob, imageCount, missingCount } = await buildBackupZip({
+        movies: list, customFormats, settings,
+        onProgress: (d, n) => setZipMsg(`이미지 내려받는 중... ${d}/${n}`),
+      });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `컬렉션_백업_${new Date().toISOString().slice(0, 10)}.zip`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      const now = Date.now(); setLastExternalBackup(now); setLastBackup(now);
+      setZipMsg(`완료: 항목 ${list.length}개, 이미지 ${imageCount}장 저장${missingCount ? `, 내려받지 못한 이미지 ${missingCount}장 (missing-posters.txt 참고)` : ''}`);
+    } catch (e) { console.error(e); setZipMsg('⚠️ 백업을 만들지 못했어요: ' + (e.message || e)); }
+    finally { setZipBusy(false); }
+  }
+  async function runMigrate() {
+    setMigBusy(true); setMigReport(null); setMigMsg('준비 중...');
+    try {
+      const report = await onMigrate((d, n) => setMigMsg(`옮기는 중... ${d}/${n}`));
+      setMigReport(report);
+      setMigMsg(report.aborted ? `⚠️ ${report.aborted}` : `완료: 성공 ${report.ok}장 / 실패 ${report.failed.length}장 / 건너뜀 ${report.skipped.length}장`);
+      return report;
+    } catch (e) { console.error(e); setMigMsg('⚠️ 이전 중 오류: ' + (e.message || e)); return null; }
+    finally { setMigBusy(false); }
+  }
+  async function checkBucket() {
+    setTestMsg('확인 중...');
+    try { await testPosterBucket(); setTestMsg('✅ 이미지 저장소가 정상 동작합니다.'); return true; }
+    catch (e) { setTestMsg('⚠️ ' + (e.message || e) + ' — 아래 설정 SQL을 Supabase에서 한 번 실행한 뒤 다시 눌러 주세요.'); return false; }
+  }
+  async function handleAll() {
+    if (loadError) { window.alert('⚠️ 전체 목록을 정상적으로 불러온 뒤 실행해 주세요.'); return; }
+    if (!window.confirm('한 번에 진행합니다.\n1) 저장소 확인  2) 이미지 이전(자동 백업 포함)  3) ZIP 백업 내려받기\n진행할까요?')) return;
+    if (!(await checkBucket())) return;
+    let list = movies;
+    if (other > 0) {
+      const report = await runMigrate();
+      if (!report || report.aborted) return;
+      list = report.movies || movies;
+    }
+    await runZip(list);
+  }
+  return (
+    <div className="drawer-backdrop" onClick={busy ? undefined : onClose}>
+      <div className="drawer" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="이미지·백업 관리">
+        <div className="drawer__head"><h2>이미지·백업 관리</h2><button type="button" className="icon-btn" onClick={onClose} disabled={busy}><X size={18} /></button></div>
+        <div className="drawer__body safety-body">
+          <section className="safety-sec">
+            <button type="button" className="btn btn--primary" onClick={handleAll} disabled={busy}>{busy ? <><Loader2 size={14} className="spin" /> 진행 중...</> : '한 번에 진행 (확인 → 이미지 이전 → ZIP 백업)'}</button>
+            <p className="safety-note">처음에는 맨 아래 "저장소 만들기" SQL을 Supabase에서 한 번 실행해야 합니다. 그 뒤에는 이 버튼 하나면 됩니다.</p>
+            {testMsg && <p className="safety-note">{testMsg}</p>}
+            {migMsg && <p className="safety-note">{migMsg}</p>}
+            {zipMsg && <p className="safety-note">{zipMsg}</p>}
+            {migReport && (migReport.failed.length > 0 || migReport.skipped.length > 0) && (
+              <div className="safety-report">
+                {migReport.skipped.length > 0 && <><b>건너뜀 (오류 이미지로 의심되어 그대로 둠)</b><ul>{migReport.skipped.map((r, i) => <li key={i}>{r.title}</li>)}</ul></>}
+                {migReport.failed.length > 0 && <><b>실패 (기존 주소 유지)</b><ul>{migReport.failed.map((r, i) => <li key={i}>{r.title} — {r.reason}</li>)}</ul></>}
+              </div>
+            )}
+          </section>
+          <section className="safety-sec">
+            <h3>현재 상태</h3>
+            <p className="safety-note">전체 이미지 {withPoster.length}장 중 Supabase에 있는 것 {own}장, 다른 곳(imgbb 등)에 있는 것 {other}장입니다. 옮긴 항목에는 이전 주소가 <code>posterUrlPrev</code>로 남습니다. 이미 사라진 이미지는 옮길 수 없으니 해당 작품에서 다시 올려 주세요.</p>
+            <p className={`safety-status${days === null || days >= BACKUP_STALE_DAYS ? ' is-warn' : ''}`}>
+              {days === null ? '아직 외부 백업(ZIP)을 한 적이 없어요.' : `마지막 외부 백업: ${new Date(lastBackup).toLocaleDateString('ko-KR')} (${days}일 전)${days >= BACKUP_STALE_DAYS ? ' — 오래됐어요' : ''}`}
+            </p>
+            <div className="safety-actions">
+              <button type="button" className="btn btn--ghost" onClick={checkBucket} disabled={busy}>저장소 연결 확인</button>
+              <button type="button" className="btn btn--ghost" onClick={() => runZip(movies)} disabled={busy}>ZIP 백업만 받기</button>
+            </div>
+          </section>
+          <section className="safety-sec">
+            <details>
+              <summary>처음 한 번: Supabase 이미지 저장소 만들기</summary>
+              <p className="safety-note">Supabase 대시보드 → SQL Editor에 아래를 붙여넣고 Run 하세요. 이미지는 5MB 이하 JPG/PNG/WebP만 받습니다.</p>
+              <pre className="safety-sql">{SETUP_SQL}</pre>
+              <button type="button" className="btn btn--ghost" onClick={() => { navigator.clipboard && navigator.clipboard.writeText(SETUP_SQL); }}>SQL 복사</button>
+            </details>
+          </section>
+        </div>
+        <div className="drawer__foot"><div /><div className="drawer__foot-actions"><button type="button" className="btn btn--ghost" onClick={onClose} disabled={busy}>닫기</button></div></div>
       </div>
     </div>
   );
@@ -4026,6 +4281,8 @@ const APP_CSS = `
           .gcard__title-button { font-size: 15px; }
           .game-gallery { grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 10px; }
         }
+        .safety-btn{position:relative}.safety-dot{position:absolute;top:4px;right:4px;width:8px;height:8px;border-radius:50%;background:var(--accent)}
+        .safety-body{display:flex;flex-direction:column;gap:18px}.safety-sec{display:flex;flex-direction:column;gap:8px;padding-bottom:16px;border-bottom:1px solid var(--line)}.safety-sec:last-child{border-bottom:0}.safety-sec h3{margin:0;font-size:15px;color:var(--ink)}.safety-note{margin:0;font-size:12.5px;line-height:1.6;color:var(--ink-soft);overflow-wrap:anywhere}.safety-status{margin:0;font-size:13px;color:var(--ink)}.safety-status.is-warn{color:var(--accent);font-weight:600}.safety-actions{display:flex;flex-wrap:wrap;gap:8px}.safety-report{font-size:12px;line-height:1.6;color:var(--ink-soft)}.safety-report ul{margin:4px 0 8px;padding-left:18px}.safety-sql{margin:8px 0;padding:10px;border-radius:8px;background:var(--paper-2);border:1px solid var(--line);font-size:11.5px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink)}.safety-sec summary{cursor:pointer;font-weight:600;color:var(--ink)}
 `;
 
 function SaveStatus({ saving }) {
@@ -4326,6 +4583,7 @@ function MovieCollectionApp() {
   const [detailId, setDetailId] = useState(null);
   const [editPick, setEditPick] = useState(null);
   const [exportOpen, setExportOpen] = useState(false);
+  const [safetyOpen, setSafetyOpen] = useState(false);
   const [repairOpen, setRepairOpen] = useState(false);
   const detailMovie = detailId ? movies.find(m => m.id === detailId) || null : null;
   const orphanGroups = useMemo(() => findOrphanGroups(filmMovies, settings), [filmMovies, settings]);
@@ -4692,6 +4950,51 @@ function MovieCollectionApp() {
   function openSettingsForSection(section) {
     setSettingsInitialSection(section);
     setSettingsOpen(true);
+  }
+
+
+  async function handleMigratePosters(onProgress) {
+    if (loadError) return { ok: 0, failed: [], skipped: [], aborted: '전체 목록을 정상적으로 불러온 뒤 실행해 주세요.' };
+    const targets = movies.filter(m => m.posterUrl && !isOwnPosterUrl(m.posterUrl));
+    if (!targets.length) return { ok: 0, failed: [], skipped: [], movies };
+    try {
+      const b = await createAutomaticBackup({ movies, customFormats, settings, reason: `이미지 이전 전 (${targets.length}장)`, force: true });
+      if (b) setBackups(prev => [{ ...b }, ...prev.filter(x => x.id !== b.id)].slice(0, BACKUP_LIMIT));
+    } catch (e) { return { ok: 0, failed: [], skipped: [], aborted: '이전 전 자동 백업을 만들지 못해 중단했어요. 데이터는 그대로입니다.' }; }
+    beginSaving();
+    const report = { ok: 0, failed: [], skipped: [] };
+    const updatedById = new Map();
+    const queue = [...targets];
+    let done = 0;
+    async function worker() {
+      while (queue.length) {
+        const mv = queue.shift();
+        const title = mv.titleKr || mv.titleOriginal || mv.id;
+        try {
+          const blob = await fetchImageBlob(mv.posterUrl);
+          const { blob: small, w, h } = await shrinkImageBlob(blob);
+          if (w <= 200 && h <= 200) { report.skipped.push({ title }); }
+          else {
+            const newUrl = await uploadPosterBlob(small);
+            const next = { ...mv, posterUrl: newUrl, posterUrlPrev: mv.posterUrl };
+            await window.storage.set(`movie:${next.id}`, JSON.stringify(next), false);
+            updatedById.set(next.id, next);
+            report.ok++;
+          }
+        } catch (e) { report.failed.push({ title, reason: String(e.message || e).slice(0, 80) }); }
+        done++; onProgress && onProgress(done, targets.length);
+      }
+    }
+    try {
+      await Promise.all([worker(), worker(), worker()]);
+      report.movies = movies.map(m => updatedById.get(m.id) || m);
+      if (updatedById.size) {
+        setMovies(prev => prev.map(m => updatedById.get(m.id) || m));
+        saveLocalCache({ movies: report.movies, customFormats, settings });
+        makeBackupAfterSave(report.movies, '이미지 Supabase 이전 완료');
+      }
+    } finally { endSaving(); }
+    return report;
   }
 
   async function handleSaveMovie(movieData, opts = {}) {
@@ -5220,6 +5523,10 @@ function MovieCollectionApp() {
             <input placeholder={appType === 'game' ? '게임명, 개발사, 배급사, 장르로 검색' : '제목, 감독, 배우, 태그로 검색'} value={search} onChange={e => { setSearch(e.target.value); setActiveFilter(null); setGameFilter(null); }} />
           </div>
           <SaveStatus saving={saving} />
+          <button type="button" className="icon-only-btn safety-btn" onClick={() => setSafetyOpen(true)} title={backupAgeDays() === null || backupAgeDays() >= BACKUP_STALE_DAYS ? '이미지·백업 관리 (외부 백업이 필요해요)' : '이미지·백업 관리'} aria-label="이미지·백업 관리">
+            <ShieldIcon size={16} />
+            {(backupAgeDays() === null || backupAgeDays() >= BACKUP_STALE_DAYS) && <span className="safety-dot" />}
+          </button>
           <button type="button" className="icon-only-btn" onClick={() => setExportOpen(true)} title="목록 내려받기" aria-label="목록 내려받기">
             <DownloadIcon size={16} />
           </button>
@@ -5464,6 +5771,10 @@ function MovieCollectionApp() {
           onChooseSingle={handleChooseSingleAtSlot}
           onChooseBulk={handleChooseBulkAtSlot}
         />
+      )}
+
+      {safetyOpen && (
+        <DataSafetyModal movies={movies} customFormats={customFormats} settings={settings} busyOuter={saving} loadError={loadError} onClose={() => setSafetyOpen(false)} onMigrate={handleMigratePosters} />
       )}
 
       {settingsOpen && (
