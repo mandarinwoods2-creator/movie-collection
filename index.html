@@ -1152,6 +1152,7 @@ async function uploadToImgbbRaw(source) {
 // 포스터 이미지 저장소: Supabase Storage(공개 버킷 'posters')
 // - 새 이미지는 브라우저에서 가로세로 900px 이내 JPEG로 줄여 올린다 (목록 로딩 속도 유지).
 // - Supabase 업로드가 실패하면 기존처럼 imgbb로 대신 저장해 등록이 막히지 않게 한다.
+// - 다른 사이트 이미지를 브라우저가 직접 못 가져오면(CORS) 이미지 중계 서비스(wsrv.nl)를 거쳐 가져온다.
 // ---------------------------------------------------------------
 const POSTER_BUCKET = 'posters';
 const POSTER_PUBLIC_PREFIX = `${SUPABASE_URL}/storage/v1/object/public/${POSTER_BUCKET}/`;
@@ -1160,12 +1161,25 @@ const LAST_BACKUP_KEY = 'mc-last-external-backup';
 function getLastExternalBackup() { try { return Number(localStorage.getItem(LAST_BACKUP_KEY)) || 0; } catch (_) { return 0; } }
 function setLastExternalBackup(ts) { try { localStorage.setItem(LAST_BACKUP_KEY, String(ts)); } catch (_) {} }
 
+async function fetchImageBlobDirect(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(url, { mode: 'cors', cache: 'no-store', signal: controller.signal });
+    if (!res.ok) throw new Error(`이미지 요청 실패 (${res.status})`);
+    const blob = await res.blob();
+    if (!blob.type.startsWith('image/')) throw new Error('이미지 파일이 아닙니다');
+    return blob;
+  } finally { clearTimeout(timer); }
+}
 async function fetchImageBlob(url) {
-  const res = await fetch(url, { mode: 'cors', cache: 'no-store' });
-  if (!res.ok) throw new Error(`이미지 요청 실패 (${res.status})`);
-  const blob = await res.blob();
-  if (!blob.type.startsWith('image/')) throw new Error('이미지 파일이 아닙니다');
-  return blob;
+  try { return await fetchImageBlobDirect(url); }
+  catch (e1) {
+    if (isOwnPosterUrl(url)) throw e1;
+    const proxy = `https://wsrv.nl/?url=${encodeURIComponent(url)}&w=900&h=900&fit=inside&we&output=jpg&q=85`;
+    try { return await fetchImageBlobDirect(proxy); }
+    catch (e2) { throw new Error(`직접: ${e1.message} / 중계: ${e2.message}`); }
+  }
 }
 async function decodeImage(blob) {
   if (typeof createImageBitmap === 'function') {
@@ -2196,7 +2210,7 @@ function DataSafetyModal({ movies, customFormats, settings, busyOuter, loadError
         <div className="drawer__body safety-body">
           <section className="safety-sec">
             <button type="button" className="btn btn--primary" onClick={handleAll} disabled={busy}>{busy ? <><Loader2 size={14} className="spin" /> 진행 중...</> : '한 번에 진행 (확인 → 이미지 이전 → ZIP 백업)'}</button>
-            <p className="safety-note">처음에는 맨 아래 "저장소 만들기" SQL을 Supabase에서 한 번 실행해야 합니다. 그 뒤에는 이 버튼 하나면 됩니다.</p>
+            <p className="safety-note">처음에는 맨 아래 "저장소 만들기" SQL을 Supabase에서 한 번 실행해야 합니다. 그 뒤에는 이 버튼 하나면 됩니다. 이미 옮긴 이미지는 건너뛰고 남은 것만 이어서 옮깁니다.</p>
             {testMsg && <p className="safety-note">{testMsg}</p>}
             {migMsg && <p className="safety-note">{migMsg}</p>}
             {zipMsg && <p className="safety-note">{zipMsg}</p>}
@@ -4981,7 +4995,7 @@ function MovieCollectionApp() {
             updatedById.set(next.id, next);
             report.ok++;
           }
-        } catch (e) { report.failed.push({ title, reason: String(e.message || e).slice(0, 80) }); }
+        } catch (e) { report.failed.push({ title, reason: String(e.message || e).slice(0, 120) }); }
         done++; onProgress && onProgress(done, targets.length);
       }
     }
