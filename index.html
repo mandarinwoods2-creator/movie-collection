@@ -2159,7 +2159,10 @@ function validateCategoryMove(settings, plan) {
     if (p.toNumber === '' || p.toNumber === null || !Number.isFinite(num) || num < 0.1 || num > 99) { errors[p.id] = '번호는 0.1~99 사이로 입력해 주세요.'; return; }
     const clash = after.find(c => c.id !== p.id && c.section === p.toSection && Number(c.number) === num);
     if (clash) errors[p.id] = `${num}번은 「${p.toSection}」에서 이미 「${clash.name}」${clash._moved ? '(함께 옮기는 항목)' : ''}이(가) 쓰고 있어요.`;
-    else if (after.some(c => c.id !== p.id && c.section === p.toSection && c.name === cat.name)) warnings[p.id] = `「${p.toSection}」에 같은 이름의 카테고리가 이미 있어요.`;
+    else {
+      const same = after.find(c => c.id !== p.id && c.section === p.toSection && c.name === cat.name);
+      if (same) warnings[p.id] = `「${p.toSection}」의 (${same.number}) ${same.name}${same._moved ? '(함께 옮기는 항목)' : ''}과(와) 이름이 같아요. 번호가 달라 옮기는 건 가능해요.`;
+    }
   });
   return { errors, warnings, ok: Object.keys(errors).length === 0 };
 }
