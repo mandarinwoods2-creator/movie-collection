@@ -2129,6 +2129,142 @@ function BulkImportModal({ onCancel, onConfirm, saving, locationSeed }) {
 }
 
 
+// ---------------------------------------------------------------
+// 카테고리를 다른 섹션으로 옮기기
+// ---------------------------------------------------------------
+const catKeyOf = c => `${c.section}|${c.name}|${String(c.number ?? '')}`;
+const locMatchesCat = (l, c) => !!l && !l.individual && l.section === c.section && l.categoryName === c.name && String(l.categoryNumber ?? '') === String(c.number ?? '');
+function countCategoryDiscs(movies, cat) {
+  let discs = 0, titles = 0;
+  movies.forEach(m => {
+    if (isGame(m)) return;
+    const n = getLocations(m).filter(l => locMatchesCat(l, cat)).length;
+    if (n > 0) { discs += n; titles += 1; }
+  });
+  return { discs, titles };
+}
+// plan: [{ id, toSection, toNumber }]. 이동 후 번호 중복·잘못된 값이 있는지 검사한다.
+function validateCategoryMove(settings, plan) {
+  const errors = {}, warnings = {};
+  const moving = new Map(plan.map(p => [p.id, p]));
+  const after = settings.categories.map(c => {
+    const p = moving.get(c.id);
+    return p ? { ...c, section: p.toSection, number: Number(p.toNumber), _moved: true } : c;
+  });
+  plan.forEach(p => {
+    const cat = settings.categories.find(c => c.id === p.id);
+    if (!cat) { errors[p.id] = '카테고리를 찾을 수 없어요.'; return; }
+    if (!settings.sections.some(s => s.name === p.toSection)) { errors[p.id] = '옮길 섹션이 없어요.'; return; }
+    const num = Number(p.toNumber);
+    if (p.toNumber === '' || p.toNumber === null || !Number.isFinite(num) || num < 0.1 || num > 99) { errors[p.id] = '번호는 0.1~99 사이로 입력해 주세요.'; return; }
+    const clash = after.find(c => c.id !== p.id && c.section === p.toSection && Number(c.number) === num);
+    if (clash) errors[p.id] = `${num}번은 「${p.toSection}」에서 이미 「${clash.name}」${clash._moved ? '(함께 옮기는 항목)' : ''}이(가) 쓰고 있어요.`;
+    else if (after.some(c => c.id !== p.id && c.section === p.toSection && c.name === cat.name)) warnings[p.id] = `「${p.toSection}」에 같은 이름의 카테고리가 이미 있어요.`;
+  });
+  return { errors, warnings, ok: Object.keys(errors).length === 0 };
+}
+function suggestMoveNumbers(settings, cats, toSection) {
+  const used = new Set(settings.categories.filter(c => c.section === toSection && !cats.some(x => x.id === c.id)).map(c => Number(c.number)));
+  const out = {};
+  cats.forEach(c => {
+    let n = Number(c.number);
+    if (used.has(n)) { n = 1; while (used.has(n)) n++; }
+    used.add(n);
+    out[c.id] = n;
+  });
+  return out;
+}
+
+function CategoryMoveModal({ settings, movies, cats, fromSection, onClose, onConfirm }) {
+  const targets = settings.sections.filter(s => s.name !== fromSection);
+  const [toSection, setToSection] = useState('');
+  const [overrides, setOverrides] = useState({});
+  const [step, setStep] = useState('edit');
+  const [busy, setBusy] = useState(false);
+  const defaults = toSection ? suggestMoveNumbers(settings, cats, toSection) : {};
+  const plan = cats.map(c => ({ id: c.id, toSection, toNumber: overrides[c.id] ?? (defaults[c.id] ?? '') }));
+  const check = toSection ? validateCategoryMove(settings, plan) : { errors: {}, warnings: {}, ok: false };
+  const counts = Object.fromEntries(cats.map(c => [c.id, countCategoryDiscs(movies, c)]));
+  const totalDiscs = cats.reduce((n, c) => n + counts[c.id].discs, 0);
+  const totalTitles = cats.reduce((n, c) => n + counts[c.id].titles, 0);
+
+  async function run() {
+    setBusy(true);
+    try { const ok = await onConfirm(plan); if (ok) onClose(); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div className="drawer-backdrop move-backdrop" onClick={busy ? undefined : onClose}>
+      <div className="drawer move-drawer" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="카테고리 섹션 이동">
+        <div className="drawer__head"><h2>카테고리 섹션 이동</h2><button type="button" className="icon-btn" onClick={onClose} disabled={busy}><X size={18} /></button></div>
+        <div className="drawer__body move-body">
+          {step === 'edit' ? (
+            <>
+              <p className="move-note">「{fromSection}」의 카테고리 {cats.length}개를 다른 섹션으로 옮겨요. 안에 등록된 디스크의 위치도 함께 바뀝니다.</p>
+              <label className="field">
+                <span>옮길 섹션</span>
+                <select value={toSection} onChange={e => { setToSection(e.target.value); setOverrides({}); }}>
+                  <option value="">섹션을 고르세요</option>
+                  {REGIONS.map(r => {
+                    const list = targets.filter(s => sectionRegion(s) === r).sort((a, b) => a.number - b.number);
+                    return list.length ? <optgroup key={r} label={r}>{list.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}</optgroup> : null;
+                  })}
+                </select>
+              </label>
+              {toSection && (
+                <div className="move-list">
+                  <div className="move-row move-row--head"><span>카테고리</span><span>디스크</span><span>새 번호</span></div>
+                  {cats.map(c => (
+                    <div key={c.id} className={`move-row${check.errors[c.id] ? ' has-error' : ''}`}>
+                      <span className="move-name">({c.number}) {c.name}</span>
+                      <span className="move-count">{counts[c.id].titles}편 · {counts[c.id].discs}장</span>
+                      <input type="number" min={0.1} max={99} step="any" value={overrides[c.id] ?? defaults[c.id] ?? ''} onChange={e => setOverrides(o => ({ ...o, [c.id]: e.target.value }))} />
+                      {check.errors[c.id] && <span className="move-msg is-error">{check.errors[c.id]}</span>}
+                      {!check.errors[c.id] && check.warnings[c.id] && <span className="move-msg">{check.warnings[c.id]}</span>}
+                    </div>
+                  ))}
+                  <p className="move-note">「{toSection}」에 이미 있는 번호: {settings.categories.filter(c => c.section === toSection).map(c => c.number).sort((a, b) => a - b).join(', ') || '없음'}</p>
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <p className="move-note"><b>한 번 더 확인해 주세요.</b> 아래 내용으로 옮기고, 해당 디스크의 위치 정보도 모두 바꿉니다.</p>
+              <div className="move-list">
+                {cats.map((c, i) => (
+                  <div key={c.id} className="move-confirm-row">
+                    <b>{c.name}</b>
+                    <span>「{fromSection}」 {c.number}번 → 「{toSection}」 {plan[i].toNumber}번</span>
+                    <span className="move-count">영화 {counts[c.id].titles}편 · 디스크 {counts[c.id].discs}장</span>
+                  </div>
+                ))}
+              </div>
+              <p className="move-note">합계: 카테고리 {cats.length}개, 영화 {totalTitles}편, 디스크 {totalDiscs}장. 옮기기 전에 자동 백업을 만들고, 번호가 겹치는지 한 번 더 검사합니다.</p>
+            </>
+          )}
+        </div>
+        <div className="drawer__foot">
+          <div />
+          <div className="drawer__foot-actions">
+            {step === 'edit' ? (
+              <>
+                <button type="button" className="btn btn--ghost" onClick={onClose}>취소</button>
+                <button type="button" className="btn btn--primary" disabled={!toSection || !check.ok} onClick={() => setStep('confirm')}>다음: 확인</button>
+              </>
+            ) : (
+              <>
+                <button type="button" className="btn btn--ghost" onClick={() => setStep('edit')} disabled={busy}>뒤로</button>
+                <button type="button" className="btn btn--primary" onClick={run} disabled={busy}>{busy ? <><Loader2 size={14} className="spin" /> 옮기는 중...</> : '이동 실행'}</button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function BackupModal({ movies, customFormats, settings, loadError, onClose }) {
   const [last, setLast] = useState(getLastExternalBackup());
   const [busy, setBusy] = useState(false);
@@ -2173,7 +2309,9 @@ function BackupModal({ movies, customFormats, settings, loadError, onClose }) {
   );
 }
 
-function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAddSection, onUpdateSection, onRemoveSection, onAddCategory, onUpdateCategory, onRemoveCategory, onResetSettings, backups, onRefreshBackups, onRestoreBackup, backupBusy }) {
+function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAddSection, onUpdateSection, onRemoveSection, onAddCategory, onUpdateCategory, onRemoveCategory, onResetSettings, backups, onRefreshBackups, onRestoreBackup, backupBusy, movies = [], onMoveCategories }) {
+  const [moveSel, setMoveSel] = useState(() => new Set());
+  const [moveOpen, setMoveOpen] = useState(false);
   const [settingsRegion, setSettingsRegion] = useState(() => {
     const sec = settings.sections.find(x => x.name === initialSection);
     return sec ? sectionRegion(sec) : DEFAULT_REGION;
@@ -2189,6 +2327,8 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
   const [resetConfirm, setResetConfirm] = useState(false);
 
   const categories = settings.categories.filter(c => c.section === activeSection).sort((a, b) => a.number - b.number);
+  const selectedCats = categories.filter(c => moveSel.has(c.id));
+  function toggleMoveSel(id) { setMoveSel(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
 
   function handleAddSectionClick() {
     const v = newSection.trim();
@@ -2213,6 +2353,7 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
   }
 
   return (
+    <>
     <div className="drawer-backdrop" onClick={onCancel}>
       <div className="drawer" onClick={e => e.stopPropagation()}>
         <div className="drawer__head">
@@ -2334,6 +2475,7 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
                 {categories.length === 0 && <p className="hint-text-small">아직 카테고리가 없어요.</p>}
                 {categories.map(c => (
                   <div key={c.id} className="category-edit-row">
+                    <input type="checkbox" className="cat-move-check" checked={moveSel.has(c.id)} onChange={() => toggleMoveSel(c.id)} title="다른 섹션으로 옮길 카테고리 선택" aria-label={`${c.name} 선택`} />
                     <input
                       key={`cn-${c.id}-${c.number}`}
                       type="number" min={0.1} max={99} step="any"
@@ -2377,6 +2519,13 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
                   </div>
                 ))}
               </div>
+              {selectedCats.length > 0 && (
+                <div className="move-bar">
+                  <span>{selectedCats.length}개 선택됨</span>
+                  <button type="button" className="btn btn--ghost btn--sm" onClick={() => setMoveOpen(true)}>다른 섹션으로 이동</button>
+                  <button type="button" className="btn btn--ghost btn--sm" onClick={() => setMoveSel(new Set())}>선택 해제</button>
+                </div>
+              )}
               <div className="field-row">
                 <input className="field--small" type="number" min={0.1} max={99} step="any" value={newCatNumber} onChange={e => setNewCatNumber(e.target.value)} placeholder="번호" />
                 <input value={newCatName} onChange={e => setNewCatName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleAddCategoryClick()} placeholder="새 카테고리 이름 (예: 80년대 영화, 뮤지컬)" />
@@ -2402,6 +2551,10 @@ function SettingsModal({ settings, initialSection, onCancel, onChangeTheme, onAd
         </div>
       </div>
     </div>
+    {moveOpen && selectedCats.length > 0 && (
+      <CategoryMoveModal settings={settings} movies={movies} cats={selectedCats} fromSection={activeSection} onClose={() => { setMoveOpen(false); }} onConfirm={async plan => { const ok = await onMoveCategories(plan); if (ok) setMoveSel(new Set()); return ok; }} />
+    )}
+    </>
   );
 }
 
@@ -4221,6 +4374,23 @@ const APP_CSS = `
           .gcard__title-button { font-size: 15px; }
           .game-gallery { grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 10px; }
         }
+        .category-edit-row input.cat-move-check { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+        .move-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--accent) 8%, transparent); font-size: 13px; color: var(--ink); }
+        .move-bar span { flex: 1; font-weight: 600; }
+        .move-backdrop { z-index: 1300; }
+        .move-drawer { max-width: 460px; }
+        .move-body { display: flex; flex-direction: column; gap: 14px; }
+        .move-note { margin: 0; font-size: 13px; line-height: 1.6; color: var(--ink-soft); overflow-wrap: anywhere; }
+        .move-list { display: flex; flex-direction: column; gap: 8px; }
+        .move-row { display: grid; grid-template-columns: 1fr auto 72px; gap: 8px; align-items: center; font-size: 13px; }
+        .move-row--head { font-size: 11.5px; color: var(--ink-soft); }
+        .move-row input[type=number] { width: 72px; }
+        .move-row.has-error input { border-color: var(--accent); }
+        .move-name { overflow-wrap: anywhere; color: var(--ink); }
+        .move-count { font-size: 12px; color: var(--ink-soft); white-space: nowrap; }
+        .move-msg { grid-column: 1 / -1; font-size: 12px; color: var(--ink-soft); }
+        .move-msg.is-error { color: var(--accent); font-weight: 600; }
+        .move-confirm-row { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 8px; background: var(--paper-2); font-size: 13px; color: var(--ink); }
         .backup-btn{position:relative}.backup-dot{position:absolute;top:4px;right:4px;width:8px;height:8px;border-radius:50%;background:var(--accent)}
         .backup-drawer{max-width:380px}.backup-body{display:flex;flex-direction:column;gap:14px;align-items:stretch}.backup-status{margin:0;font-size:16px;font-weight:600;color:var(--ink)}.backup-status.is-warn{color:var(--accent)}.backup-note{margin:0;font-size:12.5px;line-height:1.6;color:var(--ink-soft);overflow-wrap:anywhere}
 `;
@@ -4862,6 +5032,46 @@ function MovieCollectionApp() {
     } finally {
       endSaving();
     }
+  }
+
+
+  async function handleMoveCategories(plan) {
+    if (loadError) { window.alert('⚠️ 영화 전체 목록을 정상적으로 불러온 뒤 옮겨 주세요.'); return false; }
+    const check = validateCategoryMove(settings, plan);
+    if (!check.ok) { window.alert('⚠️ 번호가 겹쳐서 옮기지 않았어요.\n' + Object.values(check.errors).join('\n')); return false; }
+    const moves = new Map();
+    const nextCategories = settings.categories.map(c => {
+      const p = plan.find(x => x.id === c.id);
+      if (!p) return c;
+      moves.set(catKeyOf(c), { section: p.toSection, number: Number(p.toNumber) });
+      return { ...c, section: p.toSection, number: Number(p.toNumber) };
+    });
+    const remap = l => {
+      if (!l || l.individual || !l.categoryName) return l;
+      const to = moves.get(catKey(l));
+      return to ? { ...l, section: to.section, categoryNumber: to.number } : l;
+    };
+    const updated = [];
+    movies.forEach(mv => {
+      if (isGame(mv)) return;
+      const newPhys = mv.physicalLocation ? remap(mv.physicalLocation) : mv.physicalLocation;
+      const newLocs = Array.isArray(mv.locations) ? mv.locations.map(remap) : mv.locations;
+      if (JSON.stringify(newPhys) !== JSON.stringify(mv.physicalLocation) || JSON.stringify(newLocs) !== JSON.stringify(mv.locations)) {
+        updated.push({ ...mv, physicalLocation: newPhys, locations: newLocs });
+      }
+    });
+    try {
+      const b = await createAutomaticBackup({ movies, customFormats, settings, reason: `카테고리 섹션 이동 전 (${plan.length}개)`, force: true });
+      if (b) setBackups(prev => [{ ...b }, ...prev.filter(x => x.id !== b.id)].slice(0, BACKUP_LIMIT));
+    } catch (e) {
+      console.error(e);
+      window.alert('⚠️ 이동 전 자동 백업을 만들지 못해 중단했어요. 데이터는 그대로입니다.');
+      return false;
+    }
+    const nextSettings = { ...settings, categories: nextCategories };
+    if (updated.length === 0) { await persistSettings(nextSettings); return true; }
+    await persistSettingsWithMovies(nextSettings, updated, '카테고리 섹션 이동');
+    return true;
   }
 
   function handleUpdateCategory(id, patch) {
@@ -5689,6 +5899,8 @@ function MovieCollectionApp() {
           onRefreshBackups={refreshBackups}
           onRestoreBackup={handleRestoreBackup}
           backupBusy={backupBusy}
+          movies={filmMovies}
+          onMoveCategories={handleMoveCategories}
         />
       )}
     </div>
